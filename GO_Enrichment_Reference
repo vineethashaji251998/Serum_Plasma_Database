@@ -1,0 +1,2072 @@
+#!/usr/bin/env Rscript
+
+# =============================================================================
+# fetch_go_annotations_batch.R
+#
+# PURPOSE
+# -------
+# Batch version of fetch_go_annotations.R.
+#
+# You have a directory tree like:
+#
+#   D:\Ph.D\First_Objective\Devika_Reanalysis\Functional_Annotation\
+#       <VIRUS>\<Up/Downregulated>\Functional_Annotation.csv
+#
+# This script:
+#
+#   1. Recursively scans one or more ROOT folders and finds every file
+#      literally named "Functional_Annotation.csv".
+#
+#   2. Reads all of them, pools every UNIQUE UniProt accession across ALL
+#      files, and queries QuickGO ONCE per unique accession.
+#
+#   3. Uses a shared cache so the same protein is not queried repeatedly.
+#
+#   4. For each input file, joins the cached annotation data back and adds:
+#
+#      GO_Term_Name
+#      GO_Aspect
+#      GO_Evidence_Codes
+#      Manually_Reviewed
+#      Reference_PMIDs
+#      Reference_DOIs
+#      Reference_GO_REFs
+#      Preferred_Reference
+#      N_References
+#      Assigned_By
+#
+#   5. Writes the enriched result into the same folder as the source file.
+#
+# =============================================================================
+
+
+# =============================================================================
+# 1. LOAD REQUIRED PACKAGES
+# =============================================================================
+
+suppressWarnings(
+  suppressMessages({
+
+    need <- c(
+      "jsonlite",
+      "data.table",
+      "stringr",
+      "purrr"
+    )
+
+    missing <- need[
+      !vapply(
+        need,
+        requireNamespace,
+        logical(1),
+        quietly = TRUE
+      )
+    ]
+
+    if (length(missing) > 0) {
+
+      install.packages(
+        missing,
+        repos = "https://cloud.r-project.org"
+      )
+
+    }
+
+    library(jsonlite)
+    library(data.table)
+    library(stringr)
+    library(purrr)
+
+  })
+)
+
+
+# =============================================================================
+# 2. CONFIGURATION
+# =============================================================================
+
+DEFAULT_ROOTS <- c(
+  "C:/Vineetha/Plasma",
+  "C:/Vineetha/Serum"
+)
+
+DEFAULT_FILENAME_PATTERN <-
+  "^Functional_Annotation\\.csv$"
+
+DEFAULT_OUTPUT_NAME <-
+  "Functional_Annotation_with_GO_References.csv"
+
+# No taxon filter by default
+DEFAULT_TAXON_ID <- ""
+
+
+# =============================================================================
+# 3. QUICKGO SETTINGS
+# =============================================================================
+
+QUICKGO_ANNOTATION_URL <-
+  "https://www.ebi.ac.uk/QuickGO/services/annotation/search"
+
+QUICKGO_PAGE_SIZE <- 100
+
+QUICKGO_ID_BATCH_SIZE <- 40
+
+REQUEST_DELAY_SEC <- 0.34
+
+MAX_RETRIES <- 4
+
+
+# =============================================================================
+# 4. HTTP METHOD
+# =============================================================================
+
+# Windows:
+#     wininet
+#
+# Linux/macOS:
+#     libcurl
+
+HTTP_METHOD <- "wininet"
+
+
+# =============================================================================
+# 5. EBI PROTEINS API
+# =============================================================================
+
+EBI_PROTEINS_SEARCH_URL <-
+  "https://www.ebi.ac.uk/proteins/api/proteins"
+
+
+# =============================================================================
+# 6. GO EVIDENCE CODES
+# =============================================================================
+
+# IEA = Inferred from Electronic Annotation
+#
+# This is treated as automated evidence.
+#
+# Other evidence codes are considered manually reviewed.
+# =============================================================================
+
+AUTOMATED_EVIDENCE_CODES <- c(
+  "IEA"
+)
+
+
+# =============================================================================
+# 7. BUILD QUERY STRING
+# =============================================================================
+
+build_query_string <- function(query) {
+
+  query <- query[
+    !vapply(
+      query,
+      is.null,
+      logical(1)
+    )
+  ]
+
+  if (length(query) == 0) {
+
+    return("")
+
+  }
+
+  parts <- mapply(
+
+    function(name, value) {
+
+      paste0(
+        utils::URLencode(
+          name,
+          reserved = TRUE
+        ),
+        "=",
+        utils::URLencode(
+          as.character(value),
+          reserved = TRUE
+        )
+      )
+
+    },
+
+    names(query),
+    query,
+    SIMPLIFY = TRUE
+
+  )
+
+  paste(
+    parts,
+    collapse = "&"
+  )
+
+}
+
+
+# =============================================================================
+# 8. HTTP GET JSON FUNCTION
+# =============================================================================
+
+http_get_json <- function(
+  url,
+  query
+) {
+
+  qs <- build_query_string(
+    query
+  )
+
+  full_url <- if (
+    nzchar(qs)
+  ) {
+
+    paste0(
+      url,
+      "?",
+      qs
+    )
+
+  } else {
+
+    url
+
+  }
+
+  for (
+    attempt in seq_len(MAX_RETRIES)
+  ) {
+
+    tmp <- tempfile(
+      fileext = ".json"
+    )
+
+    ok <- tryCatch(
+
+      {
+
+        utils::download.file(
+
+          full_url,
+
+          destfile = tmp,
+
+          method = HTTP_METHOD,
+
+          quiet = TRUE,
+
+          headers = c(
+            Accept = "application/json"
+          )
+
+        )
+
+        TRUE
+
+      },
+
+      error = function(e) {
+
+        message(
+          "  request error (attempt ",
+          attempt,
+          "): ",
+          conditionMessage(e)
+        )
+
+        FALSE
+
+      },
+
+      warning = function(w) {
+
+        message(
+          "  request warning (attempt ",
+          attempt,
+          "): ",
+          conditionMessage(w)
+        )
+
+        FALSE
+
+      }
+
+    )
+
+    if (
+      isTRUE(ok) &&
+      file.exists(tmp) &&
+      file.size(tmp) > 0
+    ) {
+
+      js <- tryCatch(
+
+        jsonlite::fromJSON(
+          tmp,
+          flatten = TRUE
+        ),
+
+        error = function(e) NULL
+
+      )
+
+      unlink(tmp)
+
+      if (!is.null(js)) {
+
+        return(js)
+
+      }
+
+      message(
+        "  response was not valid JSON (attempt ",
+        attempt,
+        ")"
+      )
+
+    } else {
+
+      unlink(tmp)
+
+    }
+
+    Sys.sleep(
+      1 * attempt
+    )
+
+  }
+
+  message(
+    "  giving up after ",
+    MAX_RETRIES,
+    " attempts: ",
+    url
+  )
+
+  NULL
+
+}
+
+
+# =============================================================================
+# 9. CLASSIFY REFERENCE
+# =============================================================================
+
+# Examples:
+#
+# PMID:12345678
+# DOI:10.1000/xyz
+# GO_REF:0000002
+# Reactome:R-HSA-...
+#
+# =============================================================================
+
+classify_reference <- function(
+  ref
+) {
+
+  if (
+    is.na(ref) ||
+    ref == ""
+  ) {
+
+    return(
+      c(
+        type = NA_character_,
+        id = NA_character_
+      )
+    )
+
+  }
+
+  if (
+    str_detect(
+      ref,
+      "(?i)^pmid:"
+    )
+  ) {
+
+    return(
+      c(
+        type = "PMID",
+        id = str_remove(
+          ref,
+          "(?i)^pmid:"
+        )
+      )
+    )
+
+  }
+
+  if (
+    str_detect(
+      ref,
+      "(?i)^doi:"
+    )
+  ) {
+
+    return(
+      c(
+        type = "DOI",
+        id = str_remove(
+          ref,
+          "(?i)^doi:"
+        )
+      )
+    )
+
+  }
+
+  if (
+    str_detect(
+      ref,
+      "(?i)^go_ref:"
+    )
+  ) {
+
+    return(
+      c(
+        type = "GO_REF",
+        id = str_remove(
+          ref,
+          "(?i)^go_ref:"
+        )
+      )
+    )
+
+  }
+
+  c(
+    type = "OTHER",
+    id = ref
+  )
+
+}
+
+
+# =============================================================================
+# 10. FETCH ONE BATCH FROM QUICKGO
+# =============================================================================
+
+fetch_batch <- function(
+  ids_chunk,
+  taxon_id
+) {
+
+  gp_ids <- paste0(
+    "UniProtKB:",
+    ids_chunk,
+    collapse = ","
+  )
+
+  page <- 1
+
+  out <- list()
+
+  repeat {
+
+    q <- list(
+
+      geneProductId = gp_ids,
+
+      limit = QUICKGO_PAGE_SIZE,
+
+      page = page
+
+    )
+
+    if (
+      nzchar(taxon_id)
+    ) {
+
+      q$taxonId <- taxon_id
+
+    }
+
+    js <- http_get_json(
+      QUICKGO_ANNOTATION_URL,
+      q
+    )
+
+    Sys.sleep(
+      REQUEST_DELAY_SEC
+    )
+
+    if (
+      is.null(js) ||
+      is.null(js$results) ||
+      length(js$results) == 0
+    ) {
+
+      break
+
+    }
+
+    res <- as.data.table(
+      js$results
+    )
+
+    keep_cols <- intersect(
+
+      c(
+        "geneProductId",
+        "symbol",
+        "qualifier",
+        "goId",
+        "goName",
+        "goAspect",
+        "goEvidence",
+        "evidenceCode",
+        "reference",
+        "withFrom",
+        "assignedBy",
+        "taxonId",
+        "date"
+      ),
+
+      names(res)
+
+    )
+
+    out[
+      [length(out) + 1]
+    ] <- res[
+      ,
+      ..keep_cols
+    ]
+
+    total_pages <- tryCatch(
+
+      js$pageInfo$total,
+
+      error = function(e) NA
+
+    )
+
+    message(
+
+      "      batch page ",
+      page,
+
+      if (
+        !is.na(total_pages)
+      ) {
+
+        paste0(
+          " / ",
+          total_pages
+        )
+
+      } else {
+
+        ""
+
+      },
+
+      " (",
+      nrow(res),
+      " rows)"
+
+    )
+
+    if (
+      is.na(total_pages) ||
+      page >= total_pages
+    ) {
+
+      break
+
+    }
+
+    page <- page + 1
+
+  }
+
+  if (
+    length(out) == 0
+  ) {
+
+    return(NULL)
+
+  }
+
+  rbindlist(
+    out,
+    use.names = TRUE,
+    fill = TRUE
+  )
+
+}
+
+
+# =============================================================================
+# 11. FETCH GO ANNOTATIONS FOR UNIPROT IDS
+# =============================================================================
+
+fetch_go_annotations_for_uniprot <- function(
+
+  uniprot_ids,
+
+  taxon_id = DEFAULT_TAXON_ID
+
+) {
+
+  uniprot_ids <- unique(
+
+    na.omit(
+
+      uniprot_ids[
+        uniprot_ids != ""
+      ]
+
+    )
+
+  )
+
+  if (
+    length(uniprot_ids) == 0
+  ) {
+
+    return(NULL)
+
+  }
+
+  chunks <- split(
+
+    uniprot_ids,
+
+    ceiling(
+      seq_along(uniprot_ids) /
+        QUICKGO_ID_BATCH_SIZE
+    )
+
+  )
+
+  message(
+
+    "  Fetching GO annotations from QuickGO for ",
+
+    length(uniprot_ids),
+
+    " unique UniProt accessions ",
+
+    "(pooled across ALL files) in ",
+
+    length(chunks),
+
+    " batch(es)..."
+
+  )
+
+  results <- imap(
+
+    chunks,
+
+    function(
+      chunk,
+      i
+    ) {
+
+      message(
+
+        "    batch ",
+        i,
+        "/",
+        length(chunks),
+
+        " (",
+        length(chunk),
+        " accessions)"
+
+      )
+
+      fetch_batch(
+        chunk,
+        taxon_id
+      )
+
+    }
+
+  )
+
+  results <- compact(
+    results
+  )
+
+  if (
+    length(results) == 0
+  ) {
+
+    return(NULL)
+
+  }
+
+  rbindlist(
+
+    results,
+
+    use.names = TRUE,
+
+    fill = TRUE
+
+  )
+
+}
+
+
+# =============================================================================
+# 12. RESOLVE UNIPROT FROM GENE SYMBOL
+# =============================================================================
+
+# Used only when an input file does not have a UniProt column.
+#
+# =============================================================================
+
+resolve_uniprot_from_symbol <- function(
+
+  symbol,
+
+  taxon_id = DEFAULT_TAXON_ID
+
+) {
+
+  q <- list(
+
+    gene = symbol,
+
+    organism =
+      if (
+        nzchar(taxon_id)
+      ) {
+
+        taxon_id
+
+      } else {
+
+        NULL
+
+      },
+
+    reviewed = "true",
+
+    size = 1
+
+  )
+
+  js <- http_get_json(
+
+    EBI_PROTEINS_SEARCH_URL,
+
+    q
+
+  )
+
+  Sys.sleep(
+    REQUEST_DELAY_SEC
+  )
+
+  if (
+    is.null(js) ||
+    length(js) == 0
+  ) {
+
+    return(
+      NA_character_
+    )
+
+  }
+
+  acc <- tryCatch(
+
+    js$accession[1],
+
+    error = function(e)
+      NA_character_
+
+  )
+
+  if (
+    is.null(acc)
+  ) {
+
+    NA_character_
+
+  } else {
+
+    acc
+
+  }
+
+}
+
+
+# =============================================================================
+# 13. FIND COLUMN
+# =============================================================================
+
+find_col <- function(
+
+  dt,
+
+  explicit,
+
+  candidates
+
+) {
+
+  if (
+    !is.null(explicit) &&
+    explicit %in% names(dt)
+  ) {
+
+    return(explicit)
+
+  }
+
+  hit <- names(dt)[
+
+    toupper(names(dt)) %in%
+      toupper(candidates)
+
+  ]
+
+  if (
+    length(hit) > 0
+  ) {
+
+    return(
+      hit[1]
+    )
+
+  }
+
+  NA_character_
+
+}
+
+
+# =============================================================================
+# 14. BUILD AGGREGATE GO ANNOTATION TABLE
+# =============================================================================
+
+# This is where references are collected and combined for each:
+#
+# UniProt + GO ID
+#
+# =============================================================================
+
+build_aggregate <- function(
+  ann
+) {
+
+  ref_class <- t(
+
+    vapply(
+
+      ann$reference,
+
+      classify_reference,
+
+      character(2)
+
+    )
+
+  )
+
+  ann[
+    ,
+    `:=`(
+
+      ref_type =
+        ref_class[
+          ,
+          "type"
+        ],
+
+      ref_id =
+        ref_class[
+          ,
+          "id"
+        ]
+
+    )
+
+  ]
+
+  ann[
+    ,
+    is_automated :=
+      goEvidence %chin%
+      AUTOMATED_EVIDENCE_CODES
+  ]
+
+  ann[
+    ,
+    .join_uniprot :=
+      str_remove(
+        geneProductId,
+        "(?i)^uniprotkb:"
+      )
+  ]
+
+  ann[
+    ,
+    .join_go :=
+      toupper(
+        trimws(goId)
+      )
+  ]
+
+  ann[
+
+    ,
+
+    {
+
+      pmids <- sort(
+        unique(
+          ref_id[
+            ref_type == "PMID"
+          ]
+        )
+      )
+
+      dois <- sort(
+        unique(
+          ref_id[
+            ref_type == "DOI"
+          ]
+        )
+      )
+
+      gorefs <- sort(
+        unique(
+          ref_id[
+            ref_type == "GO_REF"
+          ]
+        )
+      )
+
+      .(
+
+        GO_Term_Name =
+          paste(
+            sort(
+              unique(
+                na.omit(
+                  goName
+                )
+              )
+            ),
+            collapse = ";"
+          ),
+
+        GO_Aspect =
+          paste(
+            sort(
+              unique(
+                na.omit(
+                  goAspect
+                )
+              )
+            ),
+            collapse = ";"
+          ),
+
+        GO_Evidence_Codes =
+          paste(
+            sort(
+              unique(
+                na.omit(
+                  goEvidence
+                )
+              )
+            ),
+            collapse = ";"
+          ),
+
+        Manually_Reviewed =
+          any(
+            !is_automated
+          ),
+
+        Reference_PMIDs =
+          paste(
+            pmids,
+            collapse = ";"
+          ),
+
+        Reference_DOIs =
+          paste(
+            dois,
+            collapse = ";"
+          ),
+
+        Reference_GO_REFs =
+          paste(
+            gorefs,
+            collapse = ";"
+          ),
+
+        Preferred_Reference =
+
+          if (
+            length(pmids) > 0
+          ) {
+
+            paste0(
+              "PMID:",
+              pmids[1]
+            )
+
+          } else if (
+            length(dois) > 0
+          ) {
+
+            paste0(
+              "DOI:",
+              dois[1]
+            )
+
+          } else if (
+            length(gorefs) > 0
+          ) {
+
+            paste0(
+              "GO_REF:",
+              gorefs[1]
+            )
+
+          } else {
+
+            NA_character_
+
+          },
+
+        N_References =
+          length(
+            unique(
+              ref_id
+            )
+          ),
+
+        Assigned_By =
+          paste(
+            sort(
+              unique(
+                na.omit(
+                  assignedBy
+                )
+              )
+            ),
+            collapse = ";"
+          )
+
+      )
+
+    },
+
+    by = .(
+      .join_uniprot,
+      .join_go
+    )
+
+  ]
+
+}
+
+
+# =============================================================================
+# 15. PROCESS ONE FILE
+# =============================================================================
+
+process_one_file <- function(
+
+  path,
+
+  agg,
+
+  uniprot_col,
+
+  symbol_col,
+
+  go_col
+
+) {
+
+  message(
+    "  -> ",
+    path
+  )
+
+  query <- fread(
+
+    path,
+
+    colClasses = "character",
+
+    encoding = "UTF-8"
+
+  )
+
+  col_uniprot <- find_col(
+
+    query,
+
+    uniprot_col,
+
+    c(
+      "UNIPROT",
+      "UNIPROTKB",
+      "UNIPROT_ID"
+    )
+
+  )
+
+  col_symbol <- find_col(
+
+    query,
+
+    symbol_col,
+
+    c(
+      "SYMBOL",
+      "GENE_SYMBOL",
+      "GENE"
+    )
+
+  )
+
+  col_go <- find_col(
+
+    query,
+
+    go_col,
+
+    c(
+      "GO",
+      "GO_ID",
+      "GOID"
+    )
+
+  )
+
+  # ---------------------------------------------------------------------------
+  # Check GO column
+  # ---------------------------------------------------------------------------
+
+  if (
+    is.na(col_go)
+  ) {
+
+    message(
+      "     SKIPPED (no GO id column found)"
+    )
+
+    return(
+      invisible(NULL)
+    )
+
+  }
+
+  # ---------------------------------------------------------------------------
+  # Check UniProt or Symbol column
+  # ---------------------------------------------------------------------------
+
+  if (
+    is.na(col_uniprot) &&
+    is.na(col_symbol)
+  ) {
+
+    message(
+      "     SKIPPED (no UNIPROT or SYMBOL column found)"
+    )
+
+    return(
+      invisible(NULL)
+    )
+
+  }
+
+  # ---------------------------------------------------------------------------
+  # Prepare join columns
+  # ---------------------------------------------------------------------------
+
+  query[
+    ,
+    .uniprot :=
+      if (
+        !is.na(col_uniprot)
+      ) {
+
+        get(col_uniprot)
+
+      } else {
+
+        NA_character_
+
+      }
+  ]
+
+  query[
+    ,
+    .join_uniprot :=
+      .uniprot
+  ]
+
+  query[
+    ,
+    .join_go :=
+      toupper(
+        trimws(
+          get(col_go)
+        )
+      )
+  ]
+
+  # ---------------------------------------------------------------------------
+  # Join QuickGO annotations
+  # ---------------------------------------------------------------------------
+
+  result <- merge(
+
+    query,
+
+    agg,
+
+    by = c(
+      ".join_uniprot",
+      ".join_go"
+    ),
+
+    all.x = TRUE
+
+  )
+
+  # ---------------------------------------------------------------------------
+  # Fill missing annotation values
+  # ---------------------------------------------------------------------------
+
+  fill_cols <- c(
+
+    "GO_Term_Name",
+
+    "GO_Aspect",
+
+    "GO_Evidence_Codes",
+
+    "Reference_PMIDs",
+
+    "Reference_DOIs",
+
+    "Reference_GO_REFs",
+
+    "Preferred_Reference",
+
+    "Assigned_By"
+
+  )
+
+  for (
+    col in fill_cols
+  ) {
+
+    result[
+      is.na(
+        get(col)
+      ),
+      (col) := ""
+    ]
+
+  }
+
+  result[
+    is.na(Manually_Reviewed),
+    Manually_Reviewed := FALSE
+  ]
+
+  result[
+    is.na(N_References),
+    N_References := 0L
+  ]
+
+  # ---------------------------------------------------------------------------
+  # Remove temporary columns
+  # ---------------------------------------------------------------------------
+
+  result[
+    ,
+    c(
+      ".join_uniprot",
+      ".join_go",
+      ".uniprot"
+    ) := NULL
+  ]
+
+  # ---------------------------------------------------------------------------
+  # Output path
+  # ---------------------------------------------------------------------------
+
+  out_path <- file.path(
+
+    dirname(path),
+
+    DEFAULT_OUTPUT_NAME
+
+  )
+
+  # ---------------------------------------------------------------------------
+  # Write output
+  # ---------------------------------------------------------------------------
+
+  fwrite(
+
+    result,
+
+    out_path
+
+  )
+
+  # ---------------------------------------------------------------------------
+  # Summary
+  # ---------------------------------------------------------------------------
+
+  n_ref <- sum(
+
+    result$N_References > 0
+
+  )
+
+  n_pmid <- sum(
+
+    result$Reference_PMIDs != ""
+
+  )
+
+  message(
+
+    "     wrote: ",
+
+    out_path,
+
+    "  [",
+
+    nrow(result),
+
+    " rows | ",
+
+    n_ref,
+
+    " with a reference | ",
+
+    n_pmid,
+
+    " with a PMID]"
+
+  )
+
+  data.table(
+
+    file = path,
+
+    out_file = out_path,
+
+    n_rows = nrow(result),
+
+    n_with_reference = n_ref,
+
+    n_with_pmid = n_pmid
+
+  )
+
+}
+
+
+# =============================================================================
+# 16. MAIN FUNCTION
+# =============================================================================
+
+main <- function(
+
+  roots = DEFAULT_ROOTS,
+
+  taxon_id = DEFAULT_TAXON_ID,
+
+  uniprot_col = NULL,
+
+  symbol_col = NULL,
+
+  go_col = NULL,
+
+  pattern = DEFAULT_FILENAME_PATTERN
+
+) {
+
+  # ---------------------------------------------------------------------------
+  # Check root folders
+  # ---------------------------------------------------------------------------
+
+  roots <- roots[
+    dir.exists(roots)
+  ]
+
+  if (
+    length(roots) == 0
+  ) {
+
+    stop(
+      "None of the provided --root folders exist. Check the paths."
+    )
+
+  }
+
+  message(
+    "Scanning root folder(s):\n  ",
+    paste(
+      roots,
+      collapse = "\n  "
+    )
+  )
+
+  # ---------------------------------------------------------------------------
+  # Find all Functional_Annotation.csv files
+  # ---------------------------------------------------------------------------
+
+  files <- unique(
+
+    unlist(
+
+      lapply(
+
+        roots,
+
+        function(r) {
+
+          list.files(
+
+            path = r,
+
+            pattern = pattern,
+
+            recursive = TRUE,
+
+            full.names = TRUE,
+
+            ignore.case = TRUE
+
+          )
+
+        }
+
+      )
+
+    )
+
+  )
+
+  if (
+    length(files) == 0
+  ) {
+
+    stop(
+
+      "No files matching '",
+      pattern,
+      "' were found under the given root folder(s)."
+
+    )
+
+  }
+
+  message(
+    "Found ",
+    length(files),
+    " file(s):"
+  )
+
+  for (
+    f in files
+  ) {
+
+    message(
+      "  - ",
+      f
+    )
+
+  }
+
+  # ===========================================================================
+  # PASS 1
+  # Read all files and pool UniProt accessions
+  # ===========================================================================
+
+  all_uniprot <- character(0)
+
+  file_cols <- list()
+
+  for (
+    f in files
+  ) {
+
+    dt <- fread(
+
+      f,
+
+      colClasses = "character",
+
+      encoding = "UTF-8",
+
+      nrows = Inf
+
+    )
+
+    col_uniprot <- find_col(
+
+      dt,
+
+      uniprot_col,
+
+      c(
+        "UNIPROT",
+        "UNIPROTKB",
+        "UNIPROT_ID"
+      )
+
+    )
+
+    col_symbol <- find_col(
+
+      dt,
+
+      symbol_col,
+
+      c(
+        "SYMBOL",
+        "GENE_SYMBOL",
+        "GENE"
+      )
+
+    )
+
+    file_cols[[f]] <- list(
+
+      uniprot = col_uniprot,
+
+      symbol = col_symbol
+
+    )
+
+    if (
+      !is.na(col_uniprot)
+    ) {
+
+      all_uniprot <- c(
+
+        all_uniprot,
+
+        dt[[col_uniprot]]
+
+      )
+
+    }
+
+  }
+
+  # Remove missing/empty values
+
+  all_uniprot <- unique(
+
+    na.omit(
+
+      all_uniprot[
+        all_uniprot != ""
+      ]
+
+    )
+
+  )
+
+  # ===========================================================================
+  # Resolve files that contain only gene symbols
+  # ===========================================================================
+
+  need_symbol_resolution <- Filter(
+
+    function(f) {
+
+      is.na(
+        file_cols[[f]]$uniprot
+      ) &&
+
+      !is.na(
+        file_cols[[f]]$symbol
+      )
+
+    },
+
+    files
+
+  )
+
+  if (
+    length(need_symbol_resolution) > 0
+  ) {
+
+    message(
+
+      "Resolving UniProt accessions from gene symbols for ",
+
+      length(need_symbol_resolution),
+
+      " file(s) with no UNIPROT column..."
+
+    )
+
+    all_symbols <- unique(
+
+      unlist(
+
+        lapply(
+
+          need_symbol_resolution,
+
+          function(f) {
+
+            fread(
+
+              f,
+
+              colClasses = "character",
+
+              encoding = "UTF-8"
+
+            )[[
+
+              file_cols[[f]]$symbol
+
+            ]]
+
+          }
+
+        )
+
+      )
+
+    )
+
+    sym2acc <- setNames(
+
+      map_chr(
+
+        all_symbols,
+
+        resolve_uniprot_from_symbol,
+
+        taxon_id = taxon_id
+
+      ),
+
+      all_symbols
+
+    )
+
+    all_uniprot <- unique(
+
+      c(
+
+        all_uniprot,
+
+        na.omit(
+          sym2acc
+        )
+
+      )
+
+    )
+
+  } else {
+
+    sym2acc <- character(0)
+
+  }
+
+  # ===========================================================================
+  # Print total UniProt count
+  # ===========================================================================
+
+  message(
+
+    "Total unique UniProt accessions across ALL files: ",
+
+    length(all_uniprot)
+
+  )
+
+  # ===========================================================================
+  # FETCH GO ANNOTATIONS ONCE
+  # ===========================================================================
+
+  ann <- fetch_go_annotations_for_uniprot(
+
+    all_uniprot,
+
+    taxon_id = taxon_id
+
+  )
+
+  if (
+    is.null(ann) ||
+    nrow(ann) == 0
+  ) {
+
+    stop(
+
+      "No annotations returned from QuickGO for any accession. ",
+
+      "Check network access / accessions / taxon filter."
+
+    )
+
+  }
+
+  message(
+
+    "Fetched ",
+
+    nrow(ann),
+
+    " raw annotation rows from QuickGO (pooled)."
+
+  )
+
+  # ===========================================================================
+  # BUILD AGGREGATE TABLE
+  # ===========================================================================
+
+  agg <- build_aggregate(
+    ann
+  )
+
+  # ===========================================================================
+  # PASS 2
+  # Join annotations back to each file
+  # ===========================================================================
+
+  message(
+
+    "\nWriting per-file outputs ",
+
+    "(same folder as each source file):"
+
+  )
+
+  summaries <- list()
+
+  for (
+    f in files
+  ) {
+
+    cols <- file_cols[[f]]
+
+    uc <- cols$uniprot
+
+    sc <- cols$symbol
+
+    # -------------------------------------------------------------------------
+    # If file has Symbol but no UniProt
+    # -------------------------------------------------------------------------
+
+    if (
+      is.na(uc) &&
+      !is.na(sc)
+    ) {
+
+      # Read file
+
+      dt <- fread(
+
+        f,
+
+        colClasses = "character",
+
+        encoding = "UTF-8"
+
+      )
+
+      # Add UniProt column
+
+      dt[
+        ,
+        UNIPROT :=
+          sym2acc[
+            get(sc)
+          ]
+      ]
+
+      # Temporary file
+
+      tmp <- tempfile(
+        fileext = ".csv"
+      )
+
+      fwrite(
+        dt,
+        tmp
+      )
+
+      # Process
+
+      summaries[[f]] <- process_one_file(
+
+        tmp,
+
+        agg,
+
+        "UNIPROT",
+
+        sc,
+
+        go_col
+
+      )
+
+      # Restore original file path in summary
+
+      if (
+        !is.null(
+          summaries[[f]]
+        )
+      ) {
+
+        summaries[[f]]$file <- f
+
+      }
+
+      unlink(
+        tmp
+      )
+
+    } else {
+
+      summaries[[f]] <- process_one_file(
+
+        f,
+
+        agg,
+
+        uniprot_col,
+
+        symbol_col,
+
+        go_col
+
+      )
+
+    }
+
+  }
+
+  # ===========================================================================
+  # SUMMARY
+  # ===========================================================================
+
+  summary_dt <- rbindlist(
+
+    compact(
+      summaries
+    ),
+
+    use.names = TRUE,
+
+    fill = TRUE
+
+  )
+
+  message(
+    "\n================ SUMMARY ================"
+  )
+
+  print(
+    summary_dt
+  )
+
+  message(
+
+    "Total files processed: ",
+
+    nrow(summary_dt),
+
+    " / ",
+
+    length(files)
+
+  )
+
+  message(
+
+    "Total rows across all files: ",
+
+    sum(
+      summary_dt$n_rows
+    )
+
+  )
+
+  message(
+
+    "Total rows with >=1 reference: ",
+
+    sum(
+      summary_dt$n_with_reference
+    )
+
+  )
+
+  message(
+
+    "Total rows with a PMID: ",
+
+    sum(
+      summary_dt$n_with_pmid
+    )
+
+  )
+
+  invisible(
+    summary_dt
+  )
+
+}
+
+
+# =============================================================================
+# 17. COMMAND-LINE ENTRY POINT
+# =============================================================================
+
+if (
+  sys.nframe() == 0
+) {
+
+  args <- commandArgs(
+    trailingOnly = TRUE
+  )
+
+  # ---------------------------------------------------------------------------
+  # Get single argument
+  # ---------------------------------------------------------------------------
+
+  get_arg <- function(
+
+    flag,
+
+    default = NULL
+
+  ) {
+
+    idx <- which(
+      args == flag
+    )
+
+    if (
+      length(idx) == 0 ||
+      idx == length(args)
+    ) {
+
+      return(
+        default
+      )
+
+    }
+
+    args[
+      idx + 1
+    ]
+
+  }
+
+  # ---------------------------------------------------------------------------
+  # Get multiple argument
+  # ---------------------------------------------------------------------------
+
+  get_arg_multi <- function(
+
+    flag,
+
+    default = NULL
+
+  ) {
+
+    idx <- which(
+      args == flag
+    )
+
+    if (
+      length(idx) == 0
+    ) {
+
+      return(
+        default
+      )
+
+    }
+
+    args[
+      idx + 1
+    ]
+
+  }
+
+  # ---------------------------------------------------------------------------
+  # Read command-line arguments
+  # ---------------------------------------------------------------------------
+
+  roots <- get_arg_multi(
+
+    "--root",
+
+    DEFAULT_ROOTS
+
+  )
+
+  # ---------------------------------------------------------------------------
+  # Run main
+  # ---------------------------------------------------------------------------
+
+  main(
+
+    roots = roots,
+
+    taxon_id =
+      get_arg(
+        "--taxon",
+        DEFAULT_TAXON_ID
+      ),
+
+    uniprot_col =
+      get_arg(
+        "--uniprot_col",
+        NULL
+      ),
+
+    symbol_col =
+      get_arg(
+        "--symbol_col",
+        NULL
+      ),
+
+    go_col =
+      get_arg(
+        "--go_col",
+        NULL
+      ),
+
+    pattern =
+      get_arg(
+        "--pattern",
+        DEFAULT_FILENAME_PATTERN
+      )
+
+  )
+
+}
