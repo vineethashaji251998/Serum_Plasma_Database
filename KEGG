@@ -1,0 +1,1087 @@
+# =============================================================================
+# KEGG ENRICHMENT ANALYSIS
+# Viral Proteomics Dataset
+#
+# Input  : Functional_Annotation.csv
+# Output : KEGG.csv
+#
+# Analysis:
+#   1. Extract UniProt IDs
+#   2. Convert UniProt -> Entrez Gene IDs
+#   3. Perform KEGG enrichment
+#   4. Calculate RichFactor
+#   5. Calculate FoldEnrichment
+#   6. Calculate zScore
+#   7. Add KEGG category/subcategory
+#   8. Save complete KEGG results
+# =============================================================================
+
+
+# =============================================================================
+# 1. LOAD REQUIRED PACKAGES
+# =============================================================================
+
+required_packages <- c(
+  "clusterProfiler",
+  "org.Hs.eg.db",
+  "dplyr",
+  "openxlsx"
+)
+
+for (pkg in required_packages) {
+
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+
+    install.packages(pkg)
+
+  }
+
+}
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+library(openxlsx)
+
+
+# =============================================================================
+# 2. USER SETTINGS
+# =============================================================================
+
+INPUT_FILE <- "Functional_Annotation.csv"
+
+OUTPUT_DIR <- "KEGG_Analysis"
+
+OUTPUT_FILE <- file.path(
+  OUTPUT_DIR,
+  "KEGG.csv"
+)
+
+# UniProt column in input file
+UNIPROT_COLUMN <- "UniProt"
+
+# Human KEGG organism
+KEGG_ORGANISM <- "hsa"
+
+# Significance threshold
+P_CUTOFF <- 0.05
+
+Q_CUTOFF <- 0.05
+
+
+# =============================================================================
+# 3. CREATE OUTPUT DIRECTORY
+# =============================================================================
+
+if (!dir.exists(OUTPUT_DIR)) {
+
+  dir.create(
+    OUTPUT_DIR,
+    recursive = TRUE
+  )
+
+}
+
+
+# =============================================================================
+# 4. READ INPUT DATA
+# =============================================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("             KEGG ENRICHMENT ANALYSIS\n")
+cat("============================================================\n\n")
+
+cat("Reading input file:\n")
+cat(INPUT_FILE, "\n\n")
+
+data <- read.csv(
+  INPUT_FILE,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+cat(
+  "Total rows:",
+  nrow(data),
+  "\n"
+)
+
+cat(
+  "Total columns:",
+  ncol(data),
+  "\n\n"
+)
+
+cat("Column names:\n")
+print(colnames(data))
+
+cat("\n")
+
+
+# =============================================================================
+# 5. CHECK UNIPROT COLUMN
+# =============================================================================
+
+if (!UNIPROT_COLUMN %in% colnames(data)) {
+
+  stop(
+    paste0(
+      "\nERROR: Column '",
+      UNIPROT_COLUMN,
+      "' was not found in the input file.\n\n",
+      "Available columns are:\n",
+      paste(
+        colnames(data),
+        collapse = "\n"
+      )
+    )
+  )
+
+}
+
+
+# =============================================================================
+# 6. EXTRACT UNIPROT IDS
+# =============================================================================
+
+cat("Extracting UniProt IDs...\n\n")
+
+uniprot_ids <- data[[UNIPROT_COLUMN]]
+
+
+# Remove NA
+uniprot_ids <- uniprot_ids[
+  !is.na(uniprot_ids)
+]
+
+
+# Convert to character
+uniprot_ids <- as.character(
+  uniprot_ids
+)
+
+
+# Remove leading/trailing spaces
+uniprot_ids <- trimws(
+  uniprot_ids
+)
+
+
+# Remove empty values
+uniprot_ids <- uniprot_ids[
+  uniprot_ids != ""
+]
+
+
+# -----------------------------------------------------------------------------
+# Handle cells containing multiple UniProt IDs
+# -----------------------------------------------------------------------------
+
+uniprot_ids <- unlist(
+  strsplit(
+    uniprot_ids,
+    "[,;|]"
+  )
+)
+
+
+# Remove spaces again
+uniprot_ids <- trimws(
+  uniprot_ids
+)
+
+
+# Remove empty values
+uniprot_ids <- uniprot_ids[
+  uniprot_ids != ""
+]
+
+
+# -----------------------------------------------------------------------------
+# Remove UniProt isoform suffix
+#
+# Example:
+# P12345-2 -> P12345
+# -----------------------------------------------------------------------------
+
+uniprot_ids <- sub(
+  "-[0-9]+$",
+  "",
+  uniprot_ids
+)
+
+
+# Unique UniProt IDs
+uniprot_ids <- unique(
+  uniprot_ids
+)
+
+
+cat(
+  "Unique UniProt IDs:",
+  length(uniprot_ids),
+  "\n\n"
+)
+
+
+# =============================================================================
+# 7. CONVERT UNIPROT TO ENTREZ
+# =============================================================================
+
+cat("Mapping UniProt IDs to Entrez Gene IDs...\n\n")
+
+mapping <- bitr(
+  uniprot_ids,
+  fromType = "UNIPROT",
+  toType = c(
+    "ENTREZID",
+    "SYMBOL"
+  ),
+  OrgDb = org.Hs.eg.db
+)
+
+
+# -----------------------------------------------------------------------------
+# Mapping statistics
+# -----------------------------------------------------------------------------
+
+mapped_ids <- unique(
+  mapping$UNIPROT
+)
+
+unmapped_ids <- setdiff(
+  uniprot_ids,
+  mapped_ids
+)
+
+
+cat(
+  "Total UniProt IDs:",
+  length(uniprot_ids),
+  "\n"
+)
+
+cat(
+  "Mapped UniProt IDs:",
+  length(mapped_ids),
+  "\n"
+)
+
+cat(
+  "Unmapped UniProt IDs:",
+  length(unmapped_ids),
+  "\n"
+)
+
+cat(
+  "Mapping percentage:",
+  round(
+    length(mapped_ids) /
+      length(uniprot_ids) *
+      100,
+    2
+  ),
+  "%\n\n"
+)
+
+
+# =============================================================================
+# 8. REMOVE DUPLICATE ENTREZ IDS
+# =============================================================================
+
+mapping <- mapping %>%
+
+  filter(
+    !is.na(ENTREZID)
+  ) %>%
+
+  distinct(
+    ENTREZID,
+    .keep_all = TRUE
+  )
+
+
+# Extract Entrez IDs
+entrez_ids <- unique(
+  mapping$ENTREZID
+)
+
+
+cat(
+  "Unique Entrez Gene IDs:",
+  length(entrez_ids),
+  "\n\n"
+)
+
+
+# =============================================================================
+# 9. CHECK INPUT GENE NUMBER
+# =============================================================================
+
+if (length(entrez_ids) < 2) {
+
+  stop(
+    "Not enough mapped Entrez Gene IDs for KEGG enrichment."
+  )
+
+}
+
+
+# =============================================================================
+# 10. KEGG ENRICHMENT
+# =============================================================================
+
+cat("Running KEGG enrichment...\n\n")
+
+kegg_result <- enrichKEGG(
+
+  gene = entrez_ids,
+
+  organism = KEGG_ORGANISM,
+
+  keyType = "ncbi-geneid",
+
+  pAdjustMethod = "BH",
+
+  pvalueCutoff = P_CUTOFF,
+
+  qvalueCutoff = Q_CUTOFF
+
+)
+
+
+# =============================================================================
+# 11. CONVERT RESULT TO DATA FRAME
+# =============================================================================
+
+kegg_df <- as.data.frame(
+  kegg_result
+)
+
+
+if (nrow(kegg_df) == 0) {
+
+  cat(
+    "\nNo significant KEGG pathways were identified.\n"
+  )
+
+  quit(
+    save = "no",
+    status = 0
+  )
+
+}
+
+
+# =============================================================================
+# 12. GET BACKGROUND SIZE
+# =============================================================================
+#
+# BgRatio is usually in the format:
+#
+#       75/9416
+#
+# where:
+#
+#       75   = genes associated with the pathway
+#       9416 = total background genes
+#
+# =============================================================================
+
+kegg_df$Bg_Pathway_Genes <- as.numeric(
+  sub(
+    "/.*",
+    "",
+    kegg_df$BgRatio
+  )
+)
+
+kegg_df$Bg_Total_Genes <- as.numeric(
+  sub(
+    ".*/",
+    "",
+    kegg_df$BgRatio
+  )
+)
+
+
+# =============================================================================
+# 13. EXTRACT GENE RATIO
+# =============================================================================
+
+kegg_df$Input_Pathway_Genes <- as.numeric(
+  sub(
+    "/.*",
+    "",
+    kegg_df$GeneRatio
+  )
+)
+
+kegg_df$Input_Total_Genes <- as.numeric(
+  sub(
+    ".*/",
+    "",
+    kegg_df$GeneRatio
+  )
+)
+
+
+# =============================================================================
+# 14. CALCULATE RICH FACTOR
+# =============================================================================
+#
+# RichFactor =
+#
+# Number of input genes mapped to pathway
+# ---------------------------------------
+# Number of background genes in pathway
+#
+# =============================================================================
+
+kegg_df$RichFactor <- (
+
+  kegg_df$Input_Pathway_Genes /
+
+    kegg_df$Bg_Pathway_Genes
+
+)
+
+
+# =============================================================================
+# 15. CALCULATE FOLD ENRICHMENT
+# =============================================================================
+#
+# FoldEnrichment =
+#
+#     observed proportion
+#     -------------------
+#     expected proportion
+#
+# =============================================================================
+
+kegg_df$FoldEnrichment <- (
+
+  (
+    kegg_df$Input_Pathway_Genes /
+      kegg_df$Input_Total_Genes
+  )
+
+  /
+
+  (
+    kegg_df$Bg_Pathway_Genes /
+      kegg_df$Bg_Total_Genes
+  )
+
+)
+
+
+# =============================================================================
+# 16. CALCULATE Z-SCORE
+# =============================================================================
+#
+# Approximation commonly used for enrichment visualization:
+#
+# zScore =
+#
+# (Observed - Expected) / sqrt(Expected)
+#
+# =============================================================================
+
+kegg_df$Expected <- (
+
+  kegg_df$Input_Total_Genes *
+
+    (
+      kegg_df$Bg_Pathway_Genes /
+        kegg_df$Bg_Total_Genes
+    )
+
+)
+
+
+kegg_df$zScore <- (
+
+  (
+    kegg_df$Input_Pathway_Genes -
+      kegg_df$Expected
+  )
+
+  /
+
+  sqrt(
+    kegg_df$Expected
+  )
+
+)
+
+
+# =============================================================================
+# 17. REMOVE TEMPORARY CALCULATION COLUMN
+# =============================================================================
+
+kegg_df$Expected <- NULL
+
+
+# =============================================================================
+# 18. ADD KEGG CATEGORY AND SUBCATEGORY
+# =============================================================================
+#
+# KEGG pathway categories can be retrieved using KEGG REST.
+#
+# This section attempts to obtain pathway hierarchy information.
+#
+# =============================================================================
+
+cat(
+  "Retrieving KEGG pathway categories...\n\n"
+)
+
+
+# -----------------------------------------------------------------------------
+# Function to retrieve KEGG hierarchy
+# -----------------------------------------------------------------------------
+
+get_kegg_hierarchy <- function() {
+
+  url <- "https://rest.kegg.jp/list/pathway/hsa"
+
+  result <- tryCatch(
+
+    {
+
+      lines <- readLines(
+        url,
+        warn = FALSE
+      )
+
+      lines
+
+    },
+
+    error = function(e) {
+
+      NULL
+
+    }
+
+  )
+
+  return(result)
+
+}
+
+
+# Try to retrieve pathway list
+kegg_lines <- get_kegg_hierarchy()
+
+
+# -----------------------------------------------------------------------------
+# Default category values
+# -----------------------------------------------------------------------------
+
+kegg_df$category <- NA_character_
+
+kegg_df$subcategory <- NA_character_
+
+
+# -----------------------------------------------------------------------------
+# If KEGG hierarchy retrieval is available
+# -----------------------------------------------------------------------------
+
+if (!is.null(kegg_lines)) {
+
+  cat(
+    "KEGG pathway information retrieved successfully.\n\n"
+  )
+
+}
+
+
+# =============================================================================
+# 19. MAP KEGG CATEGORY / SUBCATEGORY
+# =============================================================================
+#
+# KEGG hierarchy is not always returned directly by the standard
+# enrichKEGG() result. Therefore, category/subcategory assignment
+# can be obtained from the KEGG pathway hierarchy.
+#
+# The following function retrieves hierarchy information for each
+# pathway where available.
+#
+# =============================================================================
+
+get_kegg_hierarchy_single <- function(pathway_id) {
+
+  url <- paste0(
+    "https://rest.kegg.jp/get/",
+    pathway_id
+  )
+
+  txt <- tryCatch(
+
+    {
+
+      readLines(
+        url,
+        warn = FALSE
+      )
+
+    },
+
+    error = function(e) {
+
+      NULL
+
+    }
+
+  )
+
+  if (is.null(txt)) {
+
+    return(
+      c(
+        category = NA,
+        subcategory = NA
+      )
+    )
+
+  }
+
+
+  # Search CLASS field
+  class_line <- txt[
+    grepl(
+      "^CLASS",
+      txt
+    )
+  ]
+
+
+  if (length(class_line) == 0) {
+
+    return(
+      c(
+        category = NA,
+        subcategory = NA
+      )
+    )
+
+  }
+
+
+  class_text <- sub(
+    "^CLASS\\s+",
+    "",
+    class_line[1]
+  )
+
+
+  # KEGG hierarchy is commonly represented as:
+  #
+  # Metabolism; Carbohydrate metabolism
+  #
+  # or:
+  #
+  # Organismal Systems; Immune system
+  #
+
+  parts <- trimws(
+    unlist(
+      strsplit(
+        class_text,
+        ";"
+      )
+    )
+  )
+
+
+  category <- ifelse(
+    length(parts) >= 1,
+    parts[1],
+    NA
+  )
+
+
+  subcategory <- ifelse(
+    length(parts) >= 2,
+    parts[2],
+    NA
+  )
+
+
+  return(
+    c(
+      category = category,
+      subcategory = subcategory
+    )
+  )
+
+}
+
+
+# =============================================================================
+# 20. RETRIEVE CATEGORY FOR EACH PATHWAY
+# =============================================================================
+
+for (i in seq_len(nrow(kegg_df))) {
+
+  pathway_id <- kegg_df$ID[i]
+
+  hierarchy <- get_kegg_hierarchy_single(
+    pathway_id
+  )
+
+  kegg_df$category[i] <- hierarchy["category"]
+
+  kegg_df$subcategory[i] <- hierarchy["subcategory"]
+
+}
+
+
+# =============================================================================
+# 21. REORDER COLUMNS
+# =============================================================================
+
+desired_columns <- c(
+
+  "category",
+
+  "subcategory",
+
+  "ID",
+
+  "Description",
+
+  "GeneRatio",
+
+  "BgRatio",
+
+  "RichFactor",
+
+  "FoldEnrichment",
+
+  "zScore",
+
+  "pvalue",
+
+  "p.adjust",
+
+  "qvalue",
+
+  "geneID",
+
+  "Count"
+
+)
+
+
+# Keep only columns that exist
+desired_columns <- desired_columns[
+  desired_columns %in%
+    colnames(kegg_df)
+]
+
+
+kegg_df <- kegg_df[
+  ,
+  desired_columns
+]
+
+
+# =============================================================================
+# 22. SORT RESULTS BY ADJUSTED P-VALUE
+# =============================================================================
+
+kegg_df <- kegg_df %>%
+
+  arrange(
+    p.adjust
+  )
+
+
+# =============================================================================
+# 23. SIGNIFICANT KEGG PATHWAYS
+# =============================================================================
+
+significant_kegg <- kegg_df %>%
+
+  filter(
+    p.adjust < P_CUTOFF
+  )
+
+
+# =============================================================================
+# 24. PRINT RESULTS
+# =============================================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("KEGG RESULTS\n")
+cat("============================================================\n\n")
+
+cat(
+  "Total enriched pathways:",
+  nrow(kegg_df),
+  "\n"
+)
+
+cat(
+  "Significant pathways:",
+  nrow(significant_kegg),
+  "\n\n"
+)
+
+
+if (nrow(kegg_df) > 0) {
+
+  print(
+    kegg_df[
+      ,
+      c(
+        "category",
+        "subcategory",
+        "ID",
+        "Description",
+        "GeneRatio",
+        "BgRatio",
+        "RichFactor",
+        "FoldEnrichment",
+        "zScore",
+        "pvalue",
+        "p.adjust",
+        "qvalue",
+        "geneID",
+        "Count"
+      )
+    ]
+  )
+
+}
+
+
+# =============================================================================
+# 25. SAVE KEGG.CSV
+# =============================================================================
+
+write.csv(
+
+  kegg_df,
+
+  OUTPUT_FILE,
+
+  row.names = FALSE
+
+)
+
+
+# =============================================================================
+# 26. SAVE SIGNIFICANT KEGG RESULTS
+# =============================================================================
+
+write.csv(
+
+  significant_kegg,
+
+  file.path(
+    OUTPUT_DIR,
+    "KEGG_Significant.csv"
+  ),
+
+  row.names = FALSE
+
+)
+
+
+# =============================================================================
+# 27. SAVE GENE MAPPING
+# =============================================================================
+
+write.csv(
+
+  mapping,
+
+  file.path(
+    OUTPUT_DIR,
+    "UniProt_Entrez_Mapping.csv"
+  ),
+
+  row.names = FALSE
+
+)
+
+
+# =============================================================================
+# 28. SAVE UNMAPPED IDS
+# =============================================================================
+
+write.csv(
+
+  data.frame(
+    UniProt = unmapped_ids
+  ),
+
+  file.path(
+    OUTPUT_DIR,
+    "Unmapped_UniProt.csv"
+  ),
+
+  row.names = FALSE
+
+)
+
+
+# =============================================================================
+# 29. SAVE EXCEL WORKBOOK
+# =============================================================================
+
+excel_file <- file.path(
+
+  OUTPUT_DIR,
+
+  "KEGG_Analysis.xlsx"
+
+)
+
+
+wb <- createWorkbook()
+
+
+# -----------------------------------------------------------------------------
+# Sheet 1: KEGG
+# -----------------------------------------------------------------------------
+
+addWorksheet(
+  wb,
+  "KEGG"
+)
+
+writeData(
+  wb,
+  "KEGG",
+  kegg_df
+)
+
+
+# -----------------------------------------------------------------------------
+# Sheet 2: Significant KEGG
+# -----------------------------------------------------------------------------
+
+addWorksheet(
+  wb,
+  "Significant_KEGG"
+)
+
+writeData(
+  wb,
+  "Significant_KEGG",
+  significant_kegg
+)
+
+
+# -----------------------------------------------------------------------------
+# Sheet 3: Mapping
+# -----------------------------------------------------------------------------
+
+addWorksheet(
+  wb,
+  "Gene_Mapping"
+)
+
+writeData(
+  wb,
+  "Gene_Mapping",
+  mapping
+)
+
+
+# -----------------------------------------------------------------------------
+# Sheet 4: Unmapped
+# -----------------------------------------------------------------------------
+
+addWorksheet(
+  wb,
+  "Unmapped"
+)
+
+writeData(
+  wb,
+  "Unmapped",
+  data.frame(
+    UniProt = unmapped_ids
+  )
+)
+
+
+# Save workbook
+saveWorkbook(
+
+  wb,
+
+  excel_file,
+
+  overwrite = TRUE
+
+)
+
+
+# =============================================================================
+# 30. FINAL SUMMARY
+# =============================================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("              ANALYSIS COMPLETED\n")
+cat("============================================================\n\n")
+
+cat(
+  "Input UniProt IDs       : ",
+  length(uniprot_ids),
+  "\n"
+)
+
+cat(
+  "Mapped UniProt IDs      : ",
+  length(mapped_ids),
+  "\n"
+)
+
+cat(
+  "Unmapped UniProt IDs    : ",
+  length(unmapped_ids),
+  "\n"
+)
+
+cat(
+  "Unique Entrez IDs       : ",
+  length(entrez_ids),
+  "\n"
+)
+
+cat(
+  "KEGG pathways           : ",
+  nrow(kegg_df),
+  "\n"
+)
+
+cat(
+  "Significant pathways    : ",
+  nrow(significant_kegg),
+  "\n\n"
+)
+
+cat(
+  "Main output             : ",
+  OUTPUT_FILE,
+  "\n"
+)
+
+cat(
+  "Excel output            : ",
+  excel_file,
+  "\n"
+)
+
+cat("\n")
+cat("============================================================\n")
