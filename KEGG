@@ -1,1087 +1,1594 @@
-# =============================================================================
-# KEGG ENRICHMENT ANALYSIS
-# Viral Proteomics Dataset
+# ============================================================
+# KEGG PATHWAY ENRICHMENT ANALYSIS
+# PLASMA + SERUM
+# ============================================================
 #
-# Input  : Functional_Annotation.csv
-# Output : KEGG.csv
+# INPUT:
+#   SYMBOL
+#   Disease_(Virus)
+#   Differential_regulation_Discovery_Cohort
 #
-# Analysis:
-#   1. Extract UniProt IDs
-#   2. Convert UniProt -> Entrez Gene IDs
-#   3. Perform KEGG enrichment
-#   4. Calculate RichFactor
-#   5. Calculate FoldEnrichment
-#   6. Calculate zScore
-#   7. Add KEGG category/subcategory
-#   8. Save complete KEGG results
-# =============================================================================
+# ANALYSIS:
+#   Each Disease_(Virus) separately
+#
+#       UP proteins
+#            |
+#            +---- KEGG enrichment
+#
+#       DOWN proteins
+#            |
+#            +---- KEGG enrichment
+#
+# PATHWAY CLASSIFICATION:
+#       Up
+#       Down
+#       Both
+#
+# BACKGROUND:
+#   All proteins observed for that virus
+#
+# OUTPUT:
+#   D:/Ph.D/First_Objective/Devika_Reanalysis/KEGG_Enrichment/
+#
+# ============================================================
 
 
-# =============================================================================
-# 1. LOAD REQUIRED PACKAGES
-# =============================================================================
+# ============================================================
+# 1. REQUIRED PACKAGES
+# ============================================================
 
-required_packages <- c(
-  "clusterProfiler",
-  "org.Hs.eg.db",
-  "dplyr",
-  "openxlsx"
-)
-
-for (pkg in required_packages) {
-
-  if (!requireNamespace(pkg, quietly = TRUE)) {
-
-    install.packages(pkg)
-
-  }
-
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
 }
+
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+  BiocManager::install(
+    "clusterProfiler",
+    ask = FALSE,
+    update = FALSE
+  )
+}
+
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install(
+    "org.Hs.eg.db",
+    ask = FALSE,
+    update = FALSE
+  )
+}
+
+if (!requireNamespace("openxlsx", quietly = TRUE)) {
+  install.packages("openxlsx")
+}
+
+
+# ============================================================
+# 2. LOAD PACKAGES
+# ============================================================
 
 library(clusterProfiler)
 library(org.Hs.eg.db)
-library(dplyr)
 library(openxlsx)
 
 
-# =============================================================================
-# 2. USER SETTINGS
-# =============================================================================
+# ============================================================
+# 3. INPUT FILES
+# ============================================================
 
-INPUT_FILE <- "Functional_Annotation.csv"
+PLASMA_FILE <-
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/Plasma/Plasma_Diff_Virus_Details.xlsx"
 
-OUTPUT_DIR <- "KEGG_Analysis"
+SERUM_FILE <-
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/Serum/Serum_Diff_Virus_Details.xlsx"
 
-OUTPUT_FILE <- file.path(
-  OUTPUT_DIR,
-  "KEGG.csv"
-)
 
-# UniProt column in input file
-UNIPROT_COLUMN <- "UniProt"
+# ============================================================
+# 4. SHEET NAMES
+# ============================================================
 
-# Human KEGG organism
-KEGG_ORGANISM <- "hsa"
+PLASMA_SHEET <- "Plasma_UpDown"
 
-# Significance threshold
-P_CUTOFF <- 0.05
+SERUM_SHEET <- "Serum _UpDOWN"
 
-Q_CUTOFF <- 0.05
 
+# ============================================================
+# 5. OUTPUT FOLDERS
+# ============================================================
 
-# =============================================================================
-# 3. CREATE OUTPUT DIRECTORY
-# =============================================================================
+PLASMA_OUTPUT_DIR <-
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/Plasma"
 
-if (!dir.exists(OUTPUT_DIR)) {
+SERUM_OUTPUT_DIR <-
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/Serum"
 
-  dir.create(
-    OUTPUT_DIR,
-    recursive = TRUE
-  )
 
-}
+# ============================================================
+# 6. SIGNIFICANCE CUTOFF
+# ============================================================
 
+PADJ_CUTOFF <- 0.05
 
-# =============================================================================
-# 4. READ INPUT DATA
-# =============================================================================
 
-cat("\n")
-cat("============================================================\n")
-cat("             KEGG ENRICHMENT ANALYSIS\n")
-cat("============================================================\n\n")
+# ============================================================
+# 7. FUNCTION:
+#    SYMBOL -> ENTREZID
+# ============================================================
 
-cat("Reading input file:\n")
-cat(INPUT_FILE, "\n\n")
-
-data <- read.csv(
-  INPUT_FILE,
-  stringsAsFactors = FALSE,
-  check.names = FALSE
-)
-
-cat(
-  "Total rows:",
-  nrow(data),
-  "\n"
-)
-
-cat(
-  "Total columns:",
-  ncol(data),
-  "\n\n"
-)
-
-cat("Column names:\n")
-print(colnames(data))
-
-cat("\n")
-
-
-# =============================================================================
-# 5. CHECK UNIPROT COLUMN
-# =============================================================================
-
-if (!UNIPROT_COLUMN %in% colnames(data)) {
-
-  stop(
-    paste0(
-      "\nERROR: Column '",
-      UNIPROT_COLUMN,
-      "' was not found in the input file.\n\n",
-      "Available columns are:\n",
-      paste(
-        colnames(data),
-        collapse = "\n"
-      )
-    )
-  )
-
-}
-
-
-# =============================================================================
-# 6. EXTRACT UNIPROT IDS
-# =============================================================================
-
-cat("Extracting UniProt IDs...\n\n")
-
-uniprot_ids <- data[[UNIPROT_COLUMN]]
-
-
-# Remove NA
-uniprot_ids <- uniprot_ids[
-  !is.na(uniprot_ids)
-]
-
-
-# Convert to character
-uniprot_ids <- as.character(
-  uniprot_ids
-)
-
-
-# Remove leading/trailing spaces
-uniprot_ids <- trimws(
-  uniprot_ids
-)
-
-
-# Remove empty values
-uniprot_ids <- uniprot_ids[
-  uniprot_ids != ""
-]
-
-
-# -----------------------------------------------------------------------------
-# Handle cells containing multiple UniProt IDs
-# -----------------------------------------------------------------------------
-
-uniprot_ids <- unlist(
-  strsplit(
-    uniprot_ids,
-    "[,;|]"
-  )
-)
-
-
-# Remove spaces again
-uniprot_ids <- trimws(
-  uniprot_ids
-)
-
-
-# Remove empty values
-uniprot_ids <- uniprot_ids[
-  uniprot_ids != ""
-]
-
-
-# -----------------------------------------------------------------------------
-# Remove UniProt isoform suffix
-#
-# Example:
-# P12345-2 -> P12345
-# -----------------------------------------------------------------------------
-
-uniprot_ids <- sub(
-  "-[0-9]+$",
-  "",
-  uniprot_ids
-)
-
-
-# Unique UniProt IDs
-uniprot_ids <- unique(
-  uniprot_ids
-)
-
-
-cat(
-  "Unique UniProt IDs:",
-  length(uniprot_ids),
-  "\n\n"
-)
-
-
-# =============================================================================
-# 7. CONVERT UNIPROT TO ENTREZ
-# =============================================================================
-
-cat("Mapping UniProt IDs to Entrez Gene IDs...\n\n")
-
-mapping <- bitr(
-  uniprot_ids,
-  fromType = "UNIPROT",
-  toType = c(
-    "ENTREZID",
-    "SYMBOL"
-  ),
-  OrgDb = org.Hs.eg.db
-)
-
-
-# -----------------------------------------------------------------------------
-# Mapping statistics
-# -----------------------------------------------------------------------------
-
-mapped_ids <- unique(
-  mapping$UNIPROT
-)
-
-unmapped_ids <- setdiff(
-  uniprot_ids,
-  mapped_ids
-)
-
-
-cat(
-  "Total UniProt IDs:",
-  length(uniprot_ids),
-  "\n"
-)
-
-cat(
-  "Mapped UniProt IDs:",
-  length(mapped_ids),
-  "\n"
-)
-
-cat(
-  "Unmapped UniProt IDs:",
-  length(unmapped_ids),
-  "\n"
-)
-
-cat(
-  "Mapping percentage:",
-  round(
-    length(mapped_ids) /
-      length(uniprot_ids) *
-      100,
-    2
-  ),
-  "%\n\n"
-)
-
-
-# =============================================================================
-# 8. REMOVE DUPLICATE ENTREZ IDS
-# =============================================================================
-
-mapping <- mapping %>%
-
-  filter(
-    !is.na(ENTREZID)
-  ) %>%
-
-  distinct(
-    ENTREZID,
-    .keep_all = TRUE
-  )
-
-
-# Extract Entrez IDs
-entrez_ids <- unique(
-  mapping$ENTREZID
-)
-
-
-cat(
-  "Unique Entrez Gene IDs:",
-  length(entrez_ids),
-  "\n\n"
-)
-
-
-# =============================================================================
-# 9. CHECK INPUT GENE NUMBER
-# =============================================================================
-
-if (length(entrez_ids) < 2) {
-
-  stop(
-    "Not enough mapped Entrez Gene IDs for KEGG enrichment."
-  )
-
-}
-
-
-# =============================================================================
-# 10. KEGG ENRICHMENT
-# =============================================================================
-
-cat("Running KEGG enrichment...\n\n")
-
-kegg_result <- enrichKEGG(
-
-  gene = entrez_ids,
-
-  organism = KEGG_ORGANISM,
-
-  keyType = "ncbi-geneid",
-
-  pAdjustMethod = "BH",
-
-  pvalueCutoff = P_CUTOFF,
-
-  qvalueCutoff = Q_CUTOFF
-
-)
-
-
-# =============================================================================
-# 11. CONVERT RESULT TO DATA FRAME
-# =============================================================================
-
-kegg_df <- as.data.frame(
-  kegg_result
-)
-
-
-if (nrow(kegg_df) == 0) {
-
-  cat(
-    "\nNo significant KEGG pathways were identified.\n"
-  )
-
-  quit(
-    save = "no",
-    status = 0
-  )
-
-}
-
-
-# =============================================================================
-# 12. GET BACKGROUND SIZE
-# =============================================================================
-#
-# BgRatio is usually in the format:
-#
-#       75/9416
-#
-# where:
-#
-#       75   = genes associated with the pathway
-#       9416 = total background genes
-#
-# =============================================================================
-
-kegg_df$Bg_Pathway_Genes <- as.numeric(
-  sub(
-    "/.*",
-    "",
-    kegg_df$BgRatio
-  )
-)
-
-kegg_df$Bg_Total_Genes <- as.numeric(
-  sub(
-    ".*/",
-    "",
-    kegg_df$BgRatio
-  )
-)
-
-
-# =============================================================================
-# 13. EXTRACT GENE RATIO
-# =============================================================================
-
-kegg_df$Input_Pathway_Genes <- as.numeric(
-  sub(
-    "/.*",
-    "",
-    kegg_df$GeneRatio
-  )
-)
-
-kegg_df$Input_Total_Genes <- as.numeric(
-  sub(
-    ".*/",
-    "",
-    kegg_df$GeneRatio
-  )
-)
-
-
-# =============================================================================
-# 14. CALCULATE RICH FACTOR
-# =============================================================================
-#
-# RichFactor =
-#
-# Number of input genes mapped to pathway
-# ---------------------------------------
-# Number of background genes in pathway
-#
-# =============================================================================
-
-kegg_df$RichFactor <- (
-
-  kegg_df$Input_Pathway_Genes /
-
-    kegg_df$Bg_Pathway_Genes
-
-)
-
-
-# =============================================================================
-# 15. CALCULATE FOLD ENRICHMENT
-# =============================================================================
-#
-# FoldEnrichment =
-#
-#     observed proportion
-#     -------------------
-#     expected proportion
-#
-# =============================================================================
-
-kegg_df$FoldEnrichment <- (
-
-  (
-    kegg_df$Input_Pathway_Genes /
-      kegg_df$Input_Total_Genes
-  )
-
-  /
-
-  (
-    kegg_df$Bg_Pathway_Genes /
-      kegg_df$Bg_Total_Genes
-  )
-
-)
-
-
-# =============================================================================
-# 16. CALCULATE Z-SCORE
-# =============================================================================
-#
-# Approximation commonly used for enrichment visualization:
-#
-# zScore =
-#
-# (Observed - Expected) / sqrt(Expected)
-#
-# =============================================================================
-
-kegg_df$Expected <- (
-
-  kegg_df$Input_Total_Genes *
-
-    (
-      kegg_df$Bg_Pathway_Genes /
-        kegg_df$Bg_Total_Genes
-    )
-
-)
-
-
-kegg_df$zScore <- (
-
-  (
-    kegg_df$Input_Pathway_Genes -
-      kegg_df$Expected
-  )
-
-  /
-
-  sqrt(
-    kegg_df$Expected
-  )
-
-)
-
-
-# =============================================================================
-# 17. REMOVE TEMPORARY CALCULATION COLUMN
-# =============================================================================
-
-kegg_df$Expected <- NULL
-
-
-# =============================================================================
-# 18. ADD KEGG CATEGORY AND SUBCATEGORY
-# =============================================================================
-#
-# KEGG pathway categories can be retrieved using KEGG REST.
-#
-# This section attempts to obtain pathway hierarchy information.
-#
-# =============================================================================
-
-cat(
-  "Retrieving KEGG pathway categories...\n\n"
-)
-
-
-# -----------------------------------------------------------------------------
-# Function to retrieve KEGG hierarchy
-# -----------------------------------------------------------------------------
-
-get_kegg_hierarchy <- function() {
-
-  url <- "https://rest.kegg.jp/list/pathway/hsa"
-
-  result <- tryCatch(
-
-    {
-
-      lines <- readLines(
-        url,
-        warn = FALSE
-      )
-
-      lines
-
-    },
-
-    error = function(e) {
-
-      NULL
-
-    }
-
-  )
-
-  return(result)
-
-}
-
-
-# Try to retrieve pathway list
-kegg_lines <- get_kegg_hierarchy()
-
-
-# -----------------------------------------------------------------------------
-# Default category values
-# -----------------------------------------------------------------------------
-
-kegg_df$category <- NA_character_
-
-kegg_df$subcategory <- NA_character_
-
-
-# -----------------------------------------------------------------------------
-# If KEGG hierarchy retrieval is available
-# -----------------------------------------------------------------------------
-
-if (!is.null(kegg_lines)) {
-
-  cat(
-    "KEGG pathway information retrieved successfully.\n\n"
-  )
-
-}
-
-
-# =============================================================================
-# 19. MAP KEGG CATEGORY / SUBCATEGORY
-# =============================================================================
-#
-# KEGG hierarchy is not always returned directly by the standard
-# enrichKEGG() result. Therefore, category/subcategory assignment
-# can be obtained from the KEGG pathway hierarchy.
-#
-# The following function retrieves hierarchy information for each
-# pathway where available.
-#
-# =============================================================================
-
-get_kegg_hierarchy_single <- function(pathway_id) {
-
-  url <- paste0(
-    "https://rest.kegg.jp/get/",
-    pathway_id
-  )
-
-  txt <- tryCatch(
-
-    {
-
-      readLines(
-        url,
-        warn = FALSE
-      )
-
-    },
-
-    error = function(e) {
-
-      NULL
-
-    }
-
-  )
-
-  if (is.null(txt)) {
-
-    return(
-      c(
-        category = NA,
-        subcategory = NA
-      )
-    )
-
-  }
-
-
-  # Search CLASS field
-  class_line <- txt[
-    grepl(
-      "^CLASS",
-      txt
-    )
+convert_symbols <- function(symbols) {
+  
+  symbols <- as.character(symbols)
+  
+  symbols <- trimws(symbols)
+  
+  symbols <- symbols[
+    !is.na(symbols) &
+      symbols != ""
   ]
-
-
-  if (length(class_line) == 0) {
-
+  
+  symbols <- unique(symbols)
+  
+  
+  if (length(symbols) == 0) {
+    
     return(
-      c(
-        category = NA,
-        subcategory = NA
+      data.frame(
+        SYMBOL = character(),
+        ENTREZID = character(),
+        stringsAsFactors = FALSE
       )
     )
-
   }
-
-
-  class_text <- sub(
-    "^CLASS\\s+",
-    "",
-    class_line[1]
+  
+  
+  converted <- tryCatch(
+    
+    {
+      
+      bitr(
+        symbols,
+        fromType = "SYMBOL",
+        toType = "ENTREZID",
+        OrgDb = org.Hs.eg.db
+      )
+      
+    },
+    
+    error = function(e) {
+      
+      message(
+        "SYMBOL conversion error: ",
+        conditionMessage(e)
+      )
+      
+      return(
+        data.frame()
+      )
+    }
   )
+  
+  
+  if (nrow(converted) == 0) {
+    
+    return(
+      data.frame()
+    )
+  }
+  
+  
+  # Remove duplicated Entrez IDs
+  
+  converted <- converted[
+    !duplicated(
+      converted$ENTREZID
+    ),
+  ]
+  
+  
+  return(converted)
+}
 
 
-  # KEGG hierarchy is commonly represented as:
-  #
-  # Metabolism; Carbohydrate metabolism
-  #
-  # or:
-  #
-  # Organismal Systems; Immune system
-  #
+# ============================================================
+# 8. FUNCTION:
+#    RUN KEGG ENRICHMENT
+# ============================================================
 
-  parts <- trimws(
-    unlist(
-      strsplit(
-        class_text,
-        ";"
+run_kegg <- function(
+    genes,
+    background_genes
+) {
+  
+  # --------------------------------------------------------
+  # Clean target genes
+  # --------------------------------------------------------
+  
+  genes <- as.character(genes)
+  
+  genes <- trimws(genes)
+  
+  genes <- genes[
+    !is.na(genes) &
+      genes != ""
+  ]
+  
+  genes <- unique(genes)
+  
+  
+  # --------------------------------------------------------
+  # Clean background genes
+  # --------------------------------------------------------
+  
+  background_genes <- as.character(
+    background_genes
+  )
+  
+  background_genes <- trimws(
+    background_genes
+  )
+  
+  background_genes <- background_genes[
+    !is.na(background_genes) &
+      background_genes != ""
+  ]
+  
+  background_genes <- unique(
+    background_genes
+  )
+  
+  
+  # --------------------------------------------------------
+  # Nothing to analyze
+  # --------------------------------------------------------
+  
+  if (length(genes) == 0) {
+    
+    return(
+      list(
+        result = data.frame(),
+        conversion = data.frame()
       )
     )
+  }
+  
+  
+  # --------------------------------------------------------
+  # Convert target genes
+  # --------------------------------------------------------
+  
+  target_conversion <-
+    convert_symbols(
+      genes
+    )
+  
+  
+  if (nrow(target_conversion) == 0) {
+    
+    return(
+      list(
+        result = data.frame(),
+        conversion = data.frame()
+      )
+    )
+  }
+  
+  
+  # --------------------------------------------------------
+  # Convert background genes
+  # --------------------------------------------------------
+  
+  background_conversion <-
+    convert_symbols(
+      background_genes
+    )
+  
+  
+  if (nrow(background_conversion) == 0) {
+    
+    return(
+      list(
+        result = data.frame(),
+        conversion = target_conversion
+      )
+    )
+  }
+  
+  
+  # --------------------------------------------------------
+  # Get Entrez IDs
+  # --------------------------------------------------------
+  
+  target_entrez <- unique(
+    target_conversion$ENTREZID
   )
-
-
-  category <- ifelse(
-    length(parts) >= 1,
-    parts[1],
-    NA
+  
+  background_entrez <- unique(
+    background_conversion$ENTREZID
   )
-
-
-  subcategory <- ifelse(
-    length(parts) >= 2,
-    parts[2],
-    NA
+  
+  
+  # --------------------------------------------------------
+  # Keep only target genes present in background
+  # --------------------------------------------------------
+  
+  target_entrez <- intersect(
+    target_entrez,
+    background_entrez
   )
-
-
+  
+  
+  if (length(target_entrez) == 0) {
+    
+    return(
+      list(
+        result = data.frame(),
+        conversion = target_conversion
+      )
+    )
+  }
+  
+  
+  # --------------------------------------------------------
+  # KEGG enrichment
+  # --------------------------------------------------------
+  
+  kegg <- tryCatch(
+    
+    {
+      
+      enrichKEGG(
+        
+        gene = target_entrez,
+        
+        universe = background_entrez,
+        
+        organism = "hsa",
+        
+        keyType = "ncbi-geneid",
+        
+        pAdjustMethod = "BH",
+        
+        pvalueCutoff = 1,
+        
+        qvalueCutoff = 1
+      )
+      
+    },
+    
+    error = function(e) {
+      
+      message(
+        "KEGG error: ",
+        conditionMessage(e)
+      )
+      
+      return(NULL)
+    }
+  )
+  
+  
+  if (is.null(kegg)) {
+    
+    return(
+      list(
+        result = data.frame(),
+        conversion = target_conversion
+      )
+    )
+  }
+  
+  
+  kegg_df <- as.data.frame(
+    kegg
+  )
+  
+  
+  if (nrow(kegg_df) == 0) {
+    
+    return(
+      list(
+        result = data.frame(),
+        conversion = target_conversion
+      )
+    )
+  }
+  
+  
+  # --------------------------------------------------------
+  # Convert KEGG Entrez IDs back to SYMBOL
+  # --------------------------------------------------------
+  
+  kegg_df$geneID_SYMBOL <- sapply(
+    
+    kegg_df$geneID,
+    
+    function(x) {
+      
+      ids <- unlist(
+        strsplit(
+          x,
+          "/"
+        )
+      )
+      
+      
+      symbols <- target_conversion$SYMBOL[
+        match(
+          ids,
+          target_conversion$ENTREZID
+        )
+      ]
+      
+      
+      symbols <- symbols[
+        !is.na(symbols)
+      ]
+      
+      
+      paste(
+        unique(symbols),
+        collapse = ";"
+      )
+    }
+  )
+  
+  
+  # --------------------------------------------------------
+  # Count genes
+  # --------------------------------------------------------
+  
+  kegg_df$Gene_Count <- sapply(
+    
+    kegg_df$geneID_SYMBOL,
+    
+    function(x) {
+      
+      if (
+        is.na(x) ||
+        x == ""
+      ) {
+        
+        return(0)
+      }
+      
+      
+      length(
+        unique(
+          unlist(
+            strsplit(
+              x,
+              ";"
+            )
+          )
+        )
+      )
+    }
+  )
+  
+  
   return(
-    c(
-      category = category,
-      subcategory = subcategory
+    list(
+      result = kegg_df,
+      conversion = target_conversion
     )
   )
-
 }
 
 
-# =============================================================================
-# 20. RETRIEVE CATEGORY FOR EACH PATHWAY
-# =============================================================================
+# ============================================================
+# 9. FUNCTION:
+#    PROCESS ONE VIRUS
+# ============================================================
 
-for (i in seq_len(nrow(kegg_df))) {
-
-  pathway_id <- kegg_df$ID[i]
-
-  hierarchy <- get_kegg_hierarchy_single(
-    pathway_id
+process_one_virus <- function(
+    virus_data,
+    virus_name
+) {
+  
+  message("")
+  message(
+    "============================================"
   )
-
-  kegg_df$category[i] <- hierarchy["category"]
-
-  kegg_df$subcategory[i] <- hierarchy["subcategory"]
-
-}
-
-
-# =============================================================================
-# 21. REORDER COLUMNS
-# =============================================================================
-
-desired_columns <- c(
-
-  "category",
-
-  "subcategory",
-
-  "ID",
-
-  "Description",
-
-  "GeneRatio",
-
-  "BgRatio",
-
-  "RichFactor",
-
-  "FoldEnrichment",
-
-  "zScore",
-
-  "pvalue",
-
-  "p.adjust",
-
-  "qvalue",
-
-  "geneID",
-
-  "Count"
-
-)
-
-
-# Keep only columns that exist
-desired_columns <- desired_columns[
-  desired_columns %in%
-    colnames(kegg_df)
-]
-
-
-kegg_df <- kegg_df[
-  ,
-  desired_columns
-]
-
-
-# =============================================================================
-# 22. SORT RESULTS BY ADJUSTED P-VALUE
-# =============================================================================
-
-kegg_df <- kegg_df %>%
-
-  arrange(
-    p.adjust
+  message(
+    "Processing virus: ",
+    virus_name
   )
-
-
-# =============================================================================
-# 23. SIGNIFICANT KEGG PATHWAYS
-# =============================================================================
-
-significant_kegg <- kegg_df %>%
-
-  filter(
-    p.adjust < P_CUTOFF
+  message(
+    "============================================"
   )
-
-
-# =============================================================================
-# 24. PRINT RESULTS
-# =============================================================================
-
-cat("\n")
-cat("============================================================\n")
-cat("KEGG RESULTS\n")
-cat("============================================================\n\n")
-
-cat(
-  "Total enriched pathways:",
-  nrow(kegg_df),
-  "\n"
-)
-
-cat(
-  "Significant pathways:",
-  nrow(significant_kegg),
-  "\n\n"
-)
-
-
-if (nrow(kegg_df) > 0) {
-
-  print(
-    kegg_df[
-      ,
-      c(
-        "category",
-        "subcategory",
-        "ID",
-        "Description",
-        "GeneRatio",
-        "BgRatio",
-        "RichFactor",
-        "FoldEnrichment",
-        "zScore",
-        "pvalue",
-        "p.adjust",
-        "qvalue",
-        "geneID",
-        "Count"
+  
+  
+  # --------------------------------------------------------
+  # Clean SYMBOL
+  # --------------------------------------------------------
+  
+  virus_data[["SYMBOL"]] <- trimws(
+    as.character(
+      virus_data[["SYMBOL"]]
+    )
+  )
+  
+  
+  # --------------------------------------------------------
+  # Get regulation column
+  # --------------------------------------------------------
+  
+  regulation <- toupper(
+    trimws(
+      as.character(
+        virus_data[["Differential_regulation_Discovery_Cohort"]]
       )
+    )
+  )
+  
+  
+  # --------------------------------------------------------
+  # Normalize regulation
+  #
+  # Up / UP / up       -> Up
+  # Down / DOWN / down -> Down
+  # --------------------------------------------------------
+  
+  virus_data$Regulation <- ifelse(
+    
+    grepl(
+      "^UP",
+      regulation
+    ),
+    
+    "Up",
+    
+    ifelse(
+      
+      grepl(
+        "^DOWN",
+        regulation
+      ),
+      
+      "Down",
+      
+      NA_character_
+    )
+  )
+  
+  
+  # --------------------------------------------------------
+  # Remove invalid rows
+  # --------------------------------------------------------
+  
+  virus_data <- virus_data[
+    !is.na(
+      virus_data$Regulation
+    ) &
+      !is.na(
+        virus_data$SYMBOL
+      ) &
+      virus_data$SYMBOL != "",
+  ]
+  
+  
+  # --------------------------------------------------------
+  # Get UP proteins
+  # --------------------------------------------------------
+  
+  up_genes <- unique(
+    virus_data$SYMBOL[
+      virus_data$Regulation == "Up"
     ]
   )
-
+  
+  
+  # --------------------------------------------------------
+  # Get DOWN proteins
+  # --------------------------------------------------------
+  
+  down_genes <- unique(
+    virus_data$SYMBOL[
+      virus_data$Regulation == "Down"
+    ]
+  )
+  
+  
+  # --------------------------------------------------------
+  # Background
+  #
+  # All observed proteins for this virus
+  # --------------------------------------------------------
+  
+  background_genes <- unique(
+    virus_data$SYMBOL
+  )
+  
+  
+  message(
+    "Unique UP proteins: ",
+    length(up_genes)
+  )
+  
+  message(
+    "Unique DOWN proteins: ",
+    length(down_genes)
+  )
+  
+  message(
+    "Background proteins: ",
+    length(background_genes)
+  )
+  
+  
+  # ========================================================
+  # UP KEGG
+  # ========================================================
+  
+  up_result <- run_kegg(
+    
+    genes =
+      up_genes,
+    
+    background_genes =
+      background_genes
+  )
+  
+  
+  up_kegg <- up_result$result
+  
+  
+  if (nrow(up_kegg) > 0) {
+    
+    up_kegg$Disease_Virus <-
+      virus_name
+    
+    up_kegg$Regulation <-
+      "Up"
+  }
+  
+  
+  # ========================================================
+  # DOWN KEGG
+  # ========================================================
+  
+  down_result <- run_kegg(
+    
+    genes =
+      down_genes,
+    
+    background_genes =
+      background_genes
+  )
+  
+  
+  down_kegg <- down_result$result
+  
+  
+  if (nrow(down_kegg) > 0) {
+    
+    down_kegg$Disease_Virus <-
+      virus_name
+    
+    down_kegg$Regulation <-
+      "Down"
+  }
+  
+  
+  # ========================================================
+  # COMBINE UP + DOWN
+  # ========================================================
+  
+  combined <- rbind(
+    up_kegg,
+    down_kegg
+  )
+  
+  
+  # --------------------------------------------------------
+  # If no pathways
+  # --------------------------------------------------------
+  
+  if (nrow(combined) == 0) {
+    
+    message(
+      "No KEGG pathways returned for: ",
+      virus_name
+    )
+    
+    
+    return(
+      list(
+        summary = data.frame(),
+        up = up_kegg,
+        down = down_kegg,
+        conversion = rbind(
+          up_result$conversion,
+          down_result$conversion
+        )
+      )
+    )
+  }
+  
+  
+  # ========================================================
+  # CREATE PATHWAY SUMMARY
+  # ========================================================
+  
+  pathway_ids <- unique(
+    combined$ID
+  )
+  
+  
+  summary_list <- list()
+  
+  
+  for (
+    pathway_id in pathway_ids
+  ) {
+    
+    
+    pathway_data <- combined[
+      combined$ID == pathway_id,
+    ]
+    
+    
+    pathway_name <- unique(
+      pathway_data$Description
+    )[1]
+    
+    
+    # ----------------------------------------------------
+    # UP
+    # ----------------------------------------------------
+    
+    up_data <- pathway_data[
+      pathway_data$Regulation == "Up",
+    ]
+    
+    
+    significant_up <- up_data[
+      !is.na(up_data$p.adjust) &
+        up_data$p.adjust < PADJ_CUTOFF,
+    ]
+    
+    
+    up_sig <- nrow(
+      significant_up
+    ) > 0
+    
+    
+    # ----------------------------------------------------
+    # DOWN
+    # ----------------------------------------------------
+    
+    down_data <- pathway_data[
+      pathway_data$Regulation == "Down",
+    ]
+    
+    
+    significant_down <- down_data[
+      !is.na(down_data$p.adjust) &
+        down_data$p.adjust < PADJ_CUTOFF,
+    ]
+    
+    
+    down_sig <- nrow(
+      significant_down
+    ) > 0
+    
+    
+    # ----------------------------------------------------
+    # Classify
+    # ----------------------------------------------------
+    
+    if (
+      up_sig &&
+      down_sig
+    ) {
+      
+      regulation_class <- "Both"
+      
+    } else if (
+      up_sig
+    ) {
+      
+      regulation_class <- "Up"
+      
+    } else if (
+      down_sig
+    ) {
+      
+      regulation_class <- "Down"
+      
+    } else {
+      
+      next
+    }
+    
+    
+    # ====================================================
+    # UP DETAILS
+    # ====================================================
+    
+    if (up_sig) {
+      
+      best_up <- significant_up[
+        which.min(
+          significant_up$p.adjust
+        ),
+      ]
+      
+      
+      up_genes_pathway <-
+        best_up$geneID_SYMBOL
+      
+      up_pvalue <-
+        best_up$pvalue
+      
+      up_padjust <-
+        best_up$p.adjust
+      
+      up_count <-
+        best_up$Gene_Count
+      
+    } else {
+      
+      up_genes_pathway <- ""
+      
+      up_pvalue <- NA
+      
+      up_padjust <- NA
+      
+      up_count <- 0
+    }
+    
+    
+    # ====================================================
+    # DOWN DETAILS
+    # ====================================================
+    
+    if (down_sig) {
+      
+      best_down <- significant_down[
+        which.min(
+          significant_down$p.adjust
+        ),
+      ]
+      
+      
+      down_genes_pathway <-
+        best_down$geneID_SYMBOL
+      
+      down_pvalue <-
+        best_down$pvalue
+      
+      down_padjust <-
+        best_down$p.adjust
+      
+      down_count <-
+        best_down$Gene_Count
+      
+    } else {
+      
+      down_genes_pathway <- ""
+      
+      down_pvalue <- NA
+      
+      down_padjust <- NA
+      
+      down_count <- 0
+    }
+    
+    
+    # ====================================================
+    # ADD TO SUMMARY LIST
+    # ====================================================
+    
+    summary_list[[length(summary_list) + 1]] <- data.frame(
+      
+      Disease_Virus =
+        virus_name,
+      
+      KEGG_ID =
+        pathway_id,
+      
+      Pathway =
+        pathway_name,
+      
+      Regulation =
+        regulation_class,
+      
+      Up_Gene_Count =
+        up_count,
+      
+      Down_Gene_Count =
+        down_count,
+      
+      Up_Genes =
+        up_genes_pathway,
+      
+      Down_Genes =
+        down_genes_pathway,
+      
+      Up_pvalue =
+        up_pvalue,
+      
+      Up_p_adjust =
+        up_padjust,
+      
+      Down_pvalue =
+        down_pvalue,
+      
+      Down_p_adjust =
+        down_padjust,
+      
+      stringsAsFactors =
+        FALSE
+    )
+  }
+  
+  
+  # ========================================================
+  # COMBINE SUMMARY
+  # ========================================================
+  
+  if (length(summary_list) > 0) {
+    
+    pathway_summary <- do.call(
+      rbind,
+      summary_list
+    )
+    
+  } else {
+    
+    pathway_summary <- data.frame()
+  }
+  
+  
+  # ========================================================
+  # RETURN
+  # ========================================================
+  
+  return(
+    list(
+      
+      summary =
+        pathway_summary,
+      
+      up =
+        up_kegg,
+      
+      down =
+        down_kegg,
+      
+      conversion =
+        rbind(
+          up_result$conversion,
+          down_result$conversion
+        )
+    )
+  )
 }
 
 
-# =============================================================================
-# 25. SAVE KEGG.CSV
-# =============================================================================
+# ============================================================
+# 10. PROCESS PLASMA / SERUM
+# ============================================================
 
-write.csv(
+process_dataset <- function(
+    
+  input_file,
+  
+  sheet_name,
+  
+  output_dir,
+  
+  dataset_name
+  
+) {
+  
+  
+  message("")
+  message(
+    "############################################"
+  )
+  message(
+    "DATASET: ",
+    dataset_name
+  )
+  message(
+    "############################################"
+  )
+  
+  
+  # ========================================================
+  # READ EXCEL
+  # ========================================================
+  
+  data <- read.xlsx(
+    
+    input_file,
+    
+    sheet =
+      sheet_name
+  )
+  
+  
+  # ========================================================
+  # CLEAN COLUMN NAMES
+  # ========================================================
+  
+  names(data) <- trimws(
+    names(data)
+  )
+  
+  
+  message("")
+  message(
+    "Columns found:"
+  )
+  
+  print(
+    names(data)
+  )
+  
+  
+  # ========================================================
+  # CHECK REQUIRED COLUMNS
+  # ========================================================
+  
+  required_columns <- c(
+    
+    "SYMBOL",
+    
+    "Disease_(Virus)",
+    
+    "Differential_regulation_Discovery_Cohort"
+  )
+  
+  
+  missing_columns <- setdiff(
+    
+    required_columns,
+    
+    names(data)
+  )
+  
+  
+  if (
+    length(missing_columns) > 0
+  ) {
+    
+    stop(
+      paste(
+        "Missing required columns:",
+        paste(
+          missing_columns,
+          collapse = ", "
+        )
+      )
+    )
+  }
+  
+  
+  # ========================================================
+  # REGULATION VALUES
+  # ========================================================
+  
+  message("")
+  message(
+    "Original regulation values:"
+  )
+  
+  print(
+    table(
+      data[["Differential_regulation_Discovery_Cohort"]],
+      useNA = "ifany"
+    )
+  )
+  
+  
+  # ========================================================
+  # VIRUS VALUES
+  # ========================================================
+  
+  virus_values <- trimws(
+    as.character(
+      data[["Disease_(Virus)"]]
+    )
+  )
+  
+  
+  viruses <- unique(
+    virus_values
+  )
+  
+  
+  viruses <- viruses[
+    !is.na(viruses) &
+      viruses != ""
+  ]
+  
+  
+  message("")
+  message(
+    "Disease/Virus values:"
+  )
+  
+  print(
+    viruses
+  )
+  
+  
+  message("")
+  message(
+    "Number of viruses: ",
+    length(viruses)
+  )
+  
+  
+  # ========================================================
+  # CREATE RESULT LISTS
+  # ========================================================
+  
+  all_summary <- list()
+  
+  all_up <- list()
+  
+  all_down <- list()
+  
+  all_conversion <- list()
+  
+  
+  # ========================================================
+  # PROCESS EACH VIRUS
+  # ========================================================
+  
+  for (
+    virus in viruses
+  ) {
+    
+    
+    virus_data <- data[
+      virus_values == virus,
+    ]
+    
+    
+    result <- process_one_virus(
+      
+      virus_data,
+      
+      virus
+    )
+    
+    
+    # ----------------------------------------------------
+    # Summary
+    # ----------------------------------------------------
+    
+    if (
+      nrow(result$summary) > 0
+    ) {
+      
+      all_summary[[length(all_summary) + 1]] <- result$summary
+    }
+    
+    
+    # ----------------------------------------------------
+    # UP
+    # ----------------------------------------------------
+    
+    if (
+      nrow(result$up) > 0
+    ) {
+      
+      all_up[[length(all_up) + 1]] <- result$up
+    }
+    
+    
+    # ----------------------------------------------------
+    # DOWN
+    # ----------------------------------------------------
+    
+    if (
+      nrow(result$down) > 0
+    ) {
+      
+      all_down[[length(all_down) + 1]] <- result$down
+    }
+    
+    
+    # ----------------------------------------------------
+    # Gene conversion
+    # ----------------------------------------------------
+    
+    if (
+      nrow(result$conversion) > 0
+    ) {
+      
+      all_conversion[[length(all_conversion) + 1]] <- result$conversion
+    }
+  }
+  
+  
+  # ========================================================
+  # COMBINE ALL RESULTS
+  # ========================================================
+  
+  if (length(all_summary) > 0) {
+    
+    final_summary <- do.call(
+      rbind,
+      all_summary
+    )
+    
+  } else {
+    
+    final_summary <- data.frame()
+  }
+  
+  
+  if (length(all_up) > 0) {
+    
+    final_up <- do.call(
+      rbind,
+      all_up
+    )
+    
+  } else {
+    
+    final_up <- data.frame()
+  }
+  
+  
+  if (length(all_down) > 0) {
+    
+    final_down <- do.call(
+      rbind,
+      all_down
+    )
+    
+  } else {
+    
+    final_down <- data.frame()
+  }
+  
+  
+  if (length(all_conversion) > 0) {
+    
+    final_conversion <- do.call(
+      rbind,
+      all_conversion
+    )
+    
+  } else {
+    
+    final_conversion <- data.frame()
+  }
+  
+  
+  # Remove duplicate conversion rows
+  
+  if (
+    nrow(final_conversion) > 0
+  ) {
+    
+    final_conversion <- unique(
+      final_conversion
+    )
+  }
+  
+  
+  # ========================================================
+  # OUTPUT FILE
+  # ========================================================
+  
+  output_file <- file.path(
+    
+    output_dir,
+    
+    paste0(
+      dataset_name,
+      "_KEGG_Enrichment.xlsx"
+    )
+  )
+  
+  
+  # ========================================================
+  # CREATE WORKBOOK
+  # ========================================================
+  
+  wb <- createWorkbook()
+  
+  
+  # ========================================================
+  # SHEET 1:
+  # PATHWAY SUMMARY
+  # ========================================================
+  
+  addWorksheet(
+    wb,
+    "Pathway_Summary"
+  )
+  
+  
+  if (
+    nrow(final_summary) > 0
+  ) {
+    
+    writeData(
+      wb,
+      "Pathway_Summary",
+      final_summary
+    )
+    
+  } else {
+    
+    writeData(
+      wb,
+      "Pathway_Summary",
+      data.frame(
+        Message =
+          "No significant KEGG pathways found"
+      )
+    )
+  }
+  
+  
+  # ========================================================
+  # SHEET 2:
+  # UP ENRICHMENT
+  # ========================================================
+  
+  addWorksheet(
+    wb,
+    "Up_Enrichment"
+  )
+  
+  
+  if (
+    nrow(final_up) > 0
+  ) {
+    
+    writeData(
+      wb,
+      "Up_Enrichment",
+      final_up
+    )
+    
+  } else {
+    
+    writeData(
+      wb,
+      "Up_Enrichment",
+      data.frame(
+        Message =
+          "No KEGG results for Up proteins"
+      )
+    )
+  }
+  
+  
+  # ========================================================
+  # SHEET 3:
+  # DOWN ENRICHMENT
+  # ========================================================
+  
+  addWorksheet(
+    wb,
+    "Down_Enrichment"
+  )
+  
+  
+  if (
+    nrow(final_down) > 0
+  ) {
+    
+    writeData(
+      wb,
+      "Down_Enrichment",
+      final_down
+    )
+    
+  } else {
+    
+    writeData(
+      wb,
+      "Down_Enrichment",
+      data.frame(
+        Message =
+          "No KEGG results for Down proteins"
+      )
+    )
+  }
+  
+  
+  # ========================================================
+  # SHEET 4:
+  # GENE CONVERSION
+  # ========================================================
+  
+  addWorksheet(
+    wb,
+    "Gene_Conversion"
+  )
+  
+  
+  if (
+    nrow(final_conversion) > 0
+  ) {
+    
+    writeData(
+      wb,
+      "Gene_Conversion",
+      final_conversion
+    )
+    
+  } else {
+    
+    writeData(
+      wb,
+      "Gene_Conversion",
+      data.frame(
+        Message =
+          "No genes could be converted"
+      )
+    )
+  }
+  
+  
+  # ========================================================
+  # SAVE EXCEL
+  # ========================================================
+  
+  saveWorkbook(
+    
+    wb,
+    
+    output_file,
+    
+    overwrite =
+      TRUE
+  )
+  
+  
+  # ========================================================
+  # REPORT
+  # ========================================================
+  
+  message("")
+  message(
+    "============================================"
+  )
+  
+  message(
+    dataset_name,
+    " KEGG ANALYSIS COMPLETED"
+  )
+  
+  message(
+    "============================================"
+  )
+  
+  message(
+    "Output file:"
+  )
+  
+  message(
+    output_file
+  )
+  
+  message(
+    "Significant pathways: ",
+    nrow(final_summary)
+  )
+  
+  message(
+    "Up enrichment rows: ",
+    nrow(final_up)
+  )
+  
+  message(
+    "Down enrichment rows: ",
+    nrow(final_down)
+  )
+  
+  message(
+    "Mapped genes: ",
+    nrow(final_conversion)
+  )
+  
+  
+  return(
+    final_summary
+  )
+}
 
-  kegg_df,
 
-  OUTPUT_FILE,
+# ============================================================
+# 11. RUN PLASMA
+# ============================================================
 
-  row.names = FALSE
-
+plasma_results <- process_dataset(
+  
+  input_file =
+    PLASMA_FILE,
+  
+  sheet_name =
+    PLASMA_SHEET,
+  
+  output_dir =
+    PLASMA_OUTPUT_DIR,
+  
+  dataset_name =
+    "Plasma"
 )
 
 
-# =============================================================================
-# 26. SAVE SIGNIFICANT KEGG RESULTS
-# =============================================================================
+# ============================================================
+# 12. RUN SERUM
+# ============================================================
 
-write.csv(
+serum_results <- process_dataset(
+  
+  input_file =
+    SERUM_FILE,
+  
+  sheet_name =
+    SERUM_SHEET,
+  
+  output_dir =
+    SERUM_OUTPUT_DIR,
+  
+  dataset_name =
+    "Serum"
+)
 
-  significant_kegg,
 
+# ============================================================
+# 13. FINAL MESSAGE
+# ============================================================
+
+message("")
+message(
+  "############################################"
+)
+
+message(
+  "PLASMA + SERUM KEGG ANALYSIS COMPLETED"
+)
+
+message(
+  "############################################"
+)
+
+message("")
+message(
+  "All outputs saved in:"
+)
+
+message(
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/Plasma"
+)
+message(
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/Serum"
+)
+
+message("")
+message(
+  "Plasma:"
+)
+
+message(
   file.path(
-    OUTPUT_DIR,
-    "KEGG_Significant.csv"
-  ),
-
-  row.names = FALSE
-
-)
-
-
-# =============================================================================
-# 27. SAVE GENE MAPPING
-# =============================================================================
-
-write.csv(
-
-  mapping,
-
-  file.path(
-    OUTPUT_DIR,
-    "UniProt_Entrez_Mapping.csv"
-  ),
-
-  row.names = FALSE
-
-)
-
-
-# =============================================================================
-# 28. SAVE UNMAPPED IDS
-# =============================================================================
-
-write.csv(
-
-  data.frame(
-    UniProt = unmapped_ids
-  ),
-
-  file.path(
-    OUTPUT_DIR,
-    "Unmapped_UniProt.csv"
-  ),
-
-  row.names = FALSE
-
-)
-
-
-# =============================================================================
-# 29. SAVE EXCEL WORKBOOK
-# =============================================================================
-
-excel_file <- file.path(
-
-  OUTPUT_DIR,
-
-  "KEGG_Analysis.xlsx"
-
-)
-
-
-wb <- createWorkbook()
-
-
-# -----------------------------------------------------------------------------
-# Sheet 1: KEGG
-# -----------------------------------------------------------------------------
-
-addWorksheet(
-  wb,
-  "KEGG"
-)
-
-writeData(
-  wb,
-  "KEGG",
-  kegg_df
-)
-
-
-# -----------------------------------------------------------------------------
-# Sheet 2: Significant KEGG
-# -----------------------------------------------------------------------------
-
-addWorksheet(
-  wb,
-  "Significant_KEGG"
-)
-
-writeData(
-  wb,
-  "Significant_KEGG",
-  significant_kegg
-)
-
-
-# -----------------------------------------------------------------------------
-# Sheet 3: Mapping
-# -----------------------------------------------------------------------------
-
-addWorksheet(
-  wb,
-  "Gene_Mapping"
-)
-
-writeData(
-  wb,
-  "Gene_Mapping",
-  mapping
-)
-
-
-# -----------------------------------------------------------------------------
-# Sheet 4: Unmapped
-# -----------------------------------------------------------------------------
-
-addWorksheet(
-  wb,
-  "Unmapped"
-)
-
-writeData(
-  wb,
-  "Unmapped",
-  data.frame(
-    UniProt = unmapped_ids
+    PLASMA_OUTPUT_DIR,
+    "Plasma_KEGG_Enrichment.xlsx"
   )
 )
 
-
-# Save workbook
-saveWorkbook(
-
-  wb,
-
-  excel_file,
-
-  overwrite = TRUE
-
+message("")
+message(
+  "Serum:"
 )
 
-
-# =============================================================================
-# 30. FINAL SUMMARY
-# =============================================================================
-
-cat("\n")
-cat("============================================================\n")
-cat("              ANALYSIS COMPLETED\n")
-cat("============================================================\n\n")
-
-cat(
-  "Input UniProt IDs       : ",
-  length(uniprot_ids),
-  "\n"
+message(
+  file.path(
+    SERUM_OUTPUT_DIR,
+    "Serum_KEGG_Enrichment.xlsx"
+  )
 )
-
-cat(
-  "Mapped UniProt IDs      : ",
-  length(mapped_ids),
-  "\n"
-)
-
-cat(
-  "Unmapped UniProt IDs    : ",
-  length(unmapped_ids),
-  "\n"
-)
-
-cat(
-  "Unique Entrez IDs       : ",
-  length(entrez_ids),
-  "\n"
-)
-
-cat(
-  "KEGG pathways           : ",
-  nrow(kegg_df),
-  "\n"
-)
-
-cat(
-  "Significant pathways    : ",
-  nrow(significant_kegg),
-  "\n\n"
-)
-
-cat(
-  "Main output             : ",
-  OUTPUT_FILE,
-  "\n"
-)
-
-cat(
-  "Excel output            : ",
-  excel_file,
-  "\n"
-)
-
-cat("\n")
-cat("============================================================\n")
