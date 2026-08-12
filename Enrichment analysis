@@ -1,0 +1,304 @@
+# ============================================================
+# FUNCTIONAL ENRICHMENT ANALYSIS
+# GO: BP, CC, MF
+# KEGG PATHWAY ENRICHMENT
+# ============================================================
+
+# ------------------------------------------------------------
+# 1. Install required packages
+# ------------------------------------------------------------
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+  BiocManager::install("clusterProfiler")
+}
+
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Hs.eg.db")
+}
+
+if (!requireNamespace("openxlsx", quietly = TRUE)) {
+  install.packages("openxlsx")
+}
+
+# ------------------------------------------------------------
+# 2. Load packages
+# ------------------------------------------------------------
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(openxlsx)
+
+# ------------------------------------------------------------
+# 3. INPUT FILE
+# ------------------------------------------------------------
+
+input_file <- "D:/Ph.D/First_Objective/your_input_file.xlsx"
+
+# ------------------------------------------------------------
+# 4. OUTPUT FILE
+# ------------------------------------------------------------
+
+output_file <- "D:/Ph.D/First_Objective/Enrichment_Results.xlsx"
+
+# ------------------------------------------------------------
+# 5. Read input data
+# ------------------------------------------------------------
+
+data <- read.xlsx(input_file)
+
+print(colnames(data))
+
+# ------------------------------------------------------------
+# 6. Extract SYMBOL
+# ------------------------------------------------------------
+
+genes <- data$SYMBOL
+
+# Remove NA
+genes <- genes[!is.na(genes)]
+
+# Remove empty values
+genes <- genes[genes != ""]
+
+# Remove duplicates
+genes <- unique(genes)
+
+cat("Total unique SYMBOLs:", length(genes), "\n")
+
+# ------------------------------------------------------------
+# 7. Convert SYMBOL to ENTREZ ID
+# ------------------------------------------------------------
+
+gene_conversion <- bitr(
+  genes,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.Hs.eg.db
+)
+
+# Remove duplicate Entrez IDs
+gene_conversion <- gene_conversion[
+  !duplicated(gene_conversion$ENTREZID),
+]
+
+cat(
+  "Successfully mapped genes:",
+  nrow(gene_conversion),
+  "\n"
+)
+
+entrez_genes <- gene_conversion$ENTREZID
+
+# ============================================================
+# 8. GO ENRICHMENT
+# ============================================================
+
+# ------------------------------------------------------------
+# Biological Process
+# ------------------------------------------------------------
+
+GO_BP <- enrichGO(
+  gene = entrez_genes,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  readable = TRUE
+)
+
+# ------------------------------------------------------------
+# Cellular Component
+# ------------------------------------------------------------
+
+GO_CC <- enrichGO(
+  gene = entrez_genes,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  readable = TRUE
+)
+
+# ------------------------------------------------------------
+# Molecular Function
+# ------------------------------------------------------------
+
+GO_MF <- enrichGO(
+  gene = entrez_genes,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  readable = TRUE
+)
+
+# ============================================================
+# 9. KEGG ENRICHMENT
+# ============================================================
+
+KEGG <- enrichKEGG(
+  gene = entrez_genes,
+  organism = "hsa",
+  keyType = "ncbi-geneid",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1
+)
+
+# ============================================================
+# 10. Convert results to data frames
+# ============================================================
+
+BP_df <- as.data.frame(GO_BP)
+CC_df <- as.data.frame(GO_CC)
+MF_df <- as.data.frame(GO_MF)
+KEGG_df <- as.data.frame(KEGG)
+
+# ============================================================
+# 11. Keep significant results
+# ============================================================
+
+BP_sig <- BP_df[BP_df$p.adjust < 0.05, ]
+
+CC_sig <- CC_df[CC_df$p.adjust < 0.05, ]
+
+MF_sig <- MF_df[MF_df$p.adjust < 0.05, ]
+
+KEGG_sig <- KEGG_df[KEGG_df$p.adjust < 0.05, ]
+
+# ============================================================
+# 12. Create Excel workbook
+# ============================================================
+
+wb <- createWorkbook()
+
+# ------------------------------------------------------------
+# BP
+# ------------------------------------------------------------
+
+addWorksheet(wb, "GO_BP")
+writeData(
+  wb,
+  "GO_BP",
+  BP_df
+)
+
+# ------------------------------------------------------------
+# CC
+# ------------------------------------------------------------
+
+addWorksheet(wb, "GO_CC")
+writeData(
+  wb,
+  "GO_CC",
+  CC_df
+)
+
+# ------------------------------------------------------------
+# MF
+# ------------------------------------------------------------
+
+addWorksheet(wb, "GO_MF")
+writeData(
+  wb,
+  "GO_MF",
+  MF_df
+)
+
+# ------------------------------------------------------------
+# KEGG
+# ------------------------------------------------------------
+
+addWorksheet(wb, "KEGG")
+writeData(
+  wb,
+  "KEGG",
+  KEGG_df
+)
+
+# ------------------------------------------------------------
+# Significant BP
+# ------------------------------------------------------------
+
+addWorksheet(wb, "BP_Significant")
+writeData(
+  wb,
+  "BP_Significant",
+  BP_sig
+)
+
+# ------------------------------------------------------------
+# Significant CC
+# ------------------------------------------------------------
+
+addWorksheet(wb, "CC_Significant")
+writeData(
+  wb,
+  "CC_Significant",
+  CC_sig
+)
+
+# ------------------------------------------------------------
+# Significant MF
+# ------------------------------------------------------------
+
+addWorksheet(wb, "MF_Significant")
+writeData(
+  wb,
+  "MF_Significant",
+  MF_sig
+)
+
+# ------------------------------------------------------------
+# Significant KEGG
+# ------------------------------------------------------------
+
+addWorksheet(wb, "KEGG_Significant")
+writeData(
+  wb,
+  "KEGG_Significant",
+  KEGG_sig
+)
+
+# ------------------------------------------------------------
+# Gene conversion
+# ------------------------------------------------------------
+
+addWorksheet(wb, "Gene_Conversion")
+writeData(
+  wb,
+  "Gene_Conversion",
+  gene_conversion
+)
+
+# ============================================================
+# 13. Save workbook
+# ============================================================
+
+saveWorkbook(
+  wb,
+  output_file,
+  overwrite = TRUE
+)
+
+cat("\n========================================\n")
+cat("Functional enrichment analysis completed\n")
+cat("========================================\n")
+cat("Input genes:", length(genes), "\n")
+cat("Mapped genes:", length(entrez_genes), "\n")
+cat("BP pathways:", nrow(BP_df), "\n")
+cat("CC pathways:", nrow(CC_df), "\n")
+cat("MF pathways:", nrow(MF_df), "\n")
+cat("KEGG pathways:", nrow(KEGG_df), "\n")
+cat("Output:", output_file, "\n")
+cat("========================================\n")
