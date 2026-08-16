@@ -1,0 +1,861 @@
+
+#!/usr/bin/env Rscript
+
+# ============================================================
+# KEGG PATHWAY ENRICHMENT BY VIRUS
+# ONE EXCEL FILE PER DATASET
+#
+# SERUM:
+#   Serum_KEGG_ALL.xlsx
+#
+# PLASMA:
+#   Plasma_KEGG_ALL.xlsx
+#
+# EACH VIRUS = ONE SHEET
+#
+# INPUT COLUMNS USED:
+#   SYMBOL
+#   Disease_(Virus)
+#
+# REGULATION / UP / DOWN IS COMPLETELY IGNORED
+# ============================================================
+
+
+# ============================================================
+# 1. PACKAGES
+# ============================================================
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+  BiocManager::install(
+    "clusterProfiler",
+    ask = FALSE,
+    update = FALSE
+  )
+}
+
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install(
+    "org.Hs.eg.db",
+    ask = FALSE,
+    update = FALSE
+  )
+}
+
+if (!requireNamespace("openxlsx", quietly = TRUE)) {
+  install.packages("openxlsx")
+}
+
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(openxlsx)
+
+
+# ============================================================
+# 2. INPUT FILES
+# ============================================================
+
+SERUM_FILE <-
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/Serum/Serum_Diff_Virus_Up&Down.xlsx"
+
+PLASMA_FILE <-
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/Plasma/Plasma_Diff_Virus_Up&Down.xlsx"
+
+
+# ============================================================
+# 3. SHEET NAMES
+# ============================================================
+
+SERUM_SHEET <- "Serum _UpDOWN"
+
+PLASMA_SHEET <- "Plasma_UpDown"
+
+
+# ============================================================
+# 4. OUTPUT FILES
+# ============================================================
+
+SERUM_OUTPUT <-
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/Serum/Serum_KEGG_ALL.xlsx"
+
+PLASMA_OUTPUT <-
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/Plasma/Plasma_KEGG_ALL.xlsx"
+
+
+# ============================================================
+# 5. SYMBOL -> ENTREZID MAPPING
+# ============================================================
+
+make_mapping <- function(symbols) {
+  
+  symbols <- unique(
+    trimws(as.character(symbols))
+  )
+  
+  symbols <- symbols[
+    !is.na(symbols) &
+      symbols != ""
+  ]
+  
+  if (length(symbols) == 0) {
+    
+    return(
+      data.frame(
+        SYMBOL = character(),
+        ENTREZID = character(),
+        stringsAsFactors = FALSE
+      )
+    )
+  }
+  
+  
+  mapped <- tryCatch(
+    
+    suppressMessages(
+      bitr(
+        symbols,
+        fromType = "SYMBOL",
+        toType = "ENTREZID",
+        OrgDb = org.Hs.eg.db
+      )
+    ),
+    
+    error = function(e) {
+      
+      message(
+        "Mapping error: ",
+        conditionMessage(e)
+      )
+      
+      data.frame()
+    }
+  )
+  
+  
+  if (
+    is.null(mapped) ||
+    nrow(mapped) == 0
+  ) {
+    
+    return(
+      data.frame(
+        SYMBOL = character(),
+        ENTREZID = character(),
+        stringsAsFactors = FALSE
+      )
+    )
+  }
+  
+  
+  mapped$SYMBOL <- trimws(
+    as.character(mapped$SYMBOL)
+  )
+  
+  mapped$ENTREZID <- trimws(
+    as.character(mapped$ENTREZID)
+  )
+  
+  
+  mapped <- mapped[
+    !is.na(mapped$SYMBOL) &
+      mapped$SYMBOL != "" &
+      !is.na(mapped$ENTREZID) &
+      mapped$ENTREZID != "",
+    ,
+    drop = FALSE
+  ]
+  
+  
+  unique(mapped)
+}
+
+
+# ============================================================
+# 6. RUN KEGG FOR ONE VIRUS
+# ============================================================
+
+run_kegg_for_virus <- function(
+    symbols,
+    virus_name
+) {
+  
+  # ----------------------------------------------------------
+  # Clean SYMBOLs
+  # ----------------------------------------------------------
+  
+  symbols <- unique(
+    trimws(as.character(symbols))
+  )
+  
+  symbols <- symbols[
+    !is.na(symbols) &
+      symbols != ""
+  ]
+  
+  
+  cat("\n")
+  cat("--------------------------------------------\n")
+  cat("Virus: ", virus_name, "\n", sep = "")
+  cat("--------------------------------------------\n")
+  
+  
+  cat(
+    "Input SYMBOLs: ",
+    length(symbols),
+    "\n",
+    sep = ""
+  )
+  
+  
+  if (length(symbols) == 0) {
+    
+    return(data.frame())
+  }
+  
+  
+  # ----------------------------------------------------------
+  # SYMBOL -> ENTREZ
+  # ----------------------------------------------------------
+  
+  mapping <- make_mapping(symbols)
+  
+  
+  cat(
+    "Mapped SYMBOLs: ",
+    length(unique(mapping$SYMBOL)),
+    "\n",
+    sep = ""
+  )
+  
+  
+  cat(
+    "Unique ENTREZ IDs: ",
+    length(unique(mapping$ENTREZID)),
+    "\n",
+    sep = ""
+  )
+  
+  
+  if (nrow(mapping) == 0) {
+    
+    cat(
+      "No mapped genes for ",
+      virus_name,
+      "\n",
+      sep = ""
+    )
+    
+    return(data.frame())
+  }
+  
+  
+  entrez_ids <- unique(
+    mapping$ENTREZID
+  )
+  
+  
+  # ----------------------------------------------------------
+  # KEGG ENRICHMENT
+  # ----------------------------------------------------------
+  
+  cat(
+    "Running KEGG enrichment...\n"
+  )
+  
+  
+  kegg <- tryCatch(
+    
+    suppressMessages(
+      enrichKEGG(
+        gene = entrez_ids,
+        organism = "hsa",
+        keyType = "ncbi-geneid",
+        pAdjustMethod = "BH",
+        pvalueCutoff = 1,
+        qvalueCutoff = 1
+      )
+    ),
+    
+    error = function(e) {
+      
+      message(
+        "KEGG error for ",
+        virus_name,
+        ": ",
+        conditionMessage(e)
+      )
+      
+      NULL
+    }
+  )
+  
+  
+  if (is.null(kegg)) {
+    
+    return(data.frame())
+  }
+  
+  
+  result <- as.data.frame(kegg)
+  
+  
+  if (nrow(result) == 0) {
+    
+    cat(
+      "No KEGG pathways returned for ",
+      virus_name,
+      "\n",
+      sep = ""
+    )
+    
+    return(data.frame())
+  }
+  
+  
+  # ----------------------------------------------------------
+  # ADD VIRUS NAME
+  # ----------------------------------------------------------
+  
+  result$Virus <- virus_name
+  
+  
+  # ----------------------------------------------------------
+  # CONVERT PATHWAY geneID TO SYMBOLS
+  # ----------------------------------------------------------
+  
+  result$SYMBOLS <- vapply(
+    
+    seq_len(nrow(result)),
+    
+    function(i) {
+      
+      pathway_entrez <- trimws(
+        unlist(
+          strsplit(
+            as.character(result$geneID[i]),
+            "/",
+            fixed = TRUE
+          )
+        )
+      )
+      
+      
+      pathway_symbols <- mapping$SYMBOL[
+        mapping$ENTREZID %in% pathway_entrez
+      ]
+      
+      
+      pathway_symbols <- unique(
+        pathway_symbols
+      )
+      
+      
+      paste(
+        pathway_symbols,
+        collapse = ";"
+      )
+    },
+    
+    character(1)
+  )
+  
+  
+  # ----------------------------------------------------------
+  # REORDER COLUMNS
+  # ----------------------------------------------------------
+  
+  preferred_columns <- c(
+    "Virus",
+    "ID",
+    "Description",
+    "GeneRatio",
+    "BgRatio",
+    "RichFactor",
+    "FoldEnrichment",
+    "pvalue",
+    "p.adjust",
+    "qvalue",
+    "geneID",
+    "Count",
+    "SYMBOLS"
+  )
+  
+  
+  existing_columns <- preferred_columns[
+    preferred_columns %in% names(result)
+  ]
+  
+  
+  remaining_columns <- setdiff(
+    names(result),
+    existing_columns
+  )
+  
+  
+  result <- result[
+    c(
+      existing_columns,
+      remaining_columns
+    )
+  ]
+  
+  
+  cat(
+    "KEGG pathways: ",
+    nrow(result),
+    "\n",
+    sep = ""
+  )
+  
+  
+  return(result)
+}
+
+
+# ============================================================
+# 7. SAFE SHEET NAME
+# ============================================================
+
+safe_sheet_name <- function(x) {
+  
+  x <- trimws(
+    as.character(x)
+  )
+  
+  # Excel does not allow these characters
+  x <- gsub(
+    "[\\[\\]:*?/\\\\]",
+    "_",
+    x
+  )
+  
+  x <- gsub(
+    "[[:space:]]+",
+    "_",
+    x
+  )
+  
+  if (
+    is.na(x) ||
+    x == ""
+  ) {
+    x <- "Unknown"
+  }
+  
+  
+  # Excel sheet names maximum = 31 characters
+  x <- substr(
+    x,
+    1,
+    31
+  )
+  
+  
+  return(x)
+}
+
+
+# ============================================================
+# 8. MAKE UNIQUE SHEET NAMES
+# ============================================================
+
+make_unique_sheet_names <- function(viruses) {
+  
+  base_names <- sapply(
+    viruses,
+    safe_sheet_name
+  )
+  
+  
+  final_names <- character(
+    length(base_names)
+  )
+  
+  
+  for (i in seq_along(base_names)) {
+    
+    current <- base_names[i]
+    
+    if (i == 1) {
+      
+      final_names[i] <- current
+      
+    } else {
+      
+      previous <- final_names[
+        seq_len(i - 1)
+      ]
+      
+      if (!(current %in% previous)) {
+        
+        final_names[i] <- current
+        
+      } else {
+        
+        counter <- 2
+        
+        new_name <- paste0(
+          substr(
+            current,
+            1,
+            28
+          ),
+          "_",
+          counter
+        )
+        
+        
+        while (
+          new_name %in% previous
+        ) {
+          
+          counter <- counter + 1
+          
+          new_name <- paste0(
+            substr(
+              current,
+              1,
+              28
+            ),
+            "_",
+            counter
+          )
+        }
+        
+        
+        final_names[i] <- new_name
+      }
+    }
+  }
+  
+  
+  return(final_names)
+}
+
+
+# ============================================================
+# 9. PROCESS DATASET
+# ============================================================
+
+process_dataset <- function(
+    input_file,
+    sheet_name,
+    output_file,
+    dataset_name
+) {
+  
+  
+  cat("\n\n")
+  cat("############################################\n")
+  cat(
+    "DATASET: ",
+    dataset_name,
+    "\n",
+    sep = ""
+  )
+  cat("############################################\n")
+  
+  
+  cat(
+    "Reading:\n",
+    input_file,
+    "\n"
+  )
+  
+  
+  # ----------------------------------------------------------
+  # READ EXCEL
+  # ----------------------------------------------------------
+  
+  data <- read.xlsx(
+    input_file,
+    sheet = sheet_name
+  )
+  
+  
+  # ----------------------------------------------------------
+  # CLEAN COLUMN NAMES
+  # ----------------------------------------------------------
+  
+  names(data) <- trimws(
+    names(data)
+  )
+  
+  
+  # ----------------------------------------------------------
+  # REQUIRED COLUMNS
+  # ----------------------------------------------------------
+  
+  required <- c(
+    "SYMBOL",
+    "Disease_(Virus)"
+  )
+  
+  
+  missing <- setdiff(
+    required,
+    names(data)
+  )
+  
+  
+  if (length(missing) > 0) {
+    
+    stop(
+      paste(
+        "Missing required columns:",
+        paste(
+          missing,
+          collapse = ", "
+        )
+      )
+    )
+  }
+  
+  
+  # ----------------------------------------------------------
+  # CLEAN SYMBOL
+  # ----------------------------------------------------------
+  
+  data$SYMBOL <- trimws(
+    as.character(
+      data[["SYMBOL"]]
+    )
+  )
+  
+  
+  # ----------------------------------------------------------
+  # VIRUS
+  # ----------------------------------------------------------
+  
+  data$Virus <- trimws(
+    as.character(
+      data[["Disease_(Virus)"]]
+    )
+  )
+  
+  
+  # ----------------------------------------------------------
+  # REMOVE EMPTY VALUES
+  # ----------------------------------------------------------
+  
+  data <- data[
+    !is.na(data$SYMBOL) &
+      data$SYMBOL != "" &
+      !is.na(data$Virus) &
+      data$Virus != "",
+    ,
+    drop = FALSE
+  ]
+  
+  
+  # ----------------------------------------------------------
+  # UNIQUE VIRUSES
+  # ----------------------------------------------------------
+  
+  viruses <- unique(
+    data$Virus
+  )
+  
+  
+  viruses <- viruses[
+    !is.na(viruses) &
+      viruses != ""
+  ]
+  
+  
+  cat(
+    "\nViruses found: ",
+    length(viruses),
+    "\n",
+    sep = ""
+  )
+  
+  
+  print(viruses)
+  
+  
+  # ----------------------------------------------------------
+  # SHEET NAMES
+  # ----------------------------------------------------------
+  
+  sheet_names <- make_unique_sheet_names(
+    viruses
+  )
+  
+  
+  # ----------------------------------------------------------
+  # CREATE LIST FOR EXCEL
+  # ----------------------------------------------------------
+  
+  kegg_sheets <- list()
+  
+  
+  # ----------------------------------------------------------
+  # PROCESS EACH VIRUS
+  # ----------------------------------------------------------
+  
+  for (i in seq_along(viruses)) {
+    
+    
+    virus <- viruses[i]
+    
+    sheet_name_output <- sheet_names[i]
+    
+    
+    cat("\n")
+    cat("============================================\n")
+    cat(
+      "Processing: ",
+      virus,
+      "\n",
+      sep = ""
+    )
+    cat(
+      "Sheet: ",
+      sheet_name_output,
+      "\n",
+      sep = ""
+    )
+    cat("============================================\n")
+    
+    
+    # --------------------------------------------------------
+    # ONLY THIS VIRUS
+    # --------------------------------------------------------
+    
+    virus_data <- data[
+      data$Virus == virus,
+      ,
+      drop = FALSE
+    ]
+    
+    
+    # --------------------------------------------------------
+    # UNIQUE SYMBOLS
+    # --------------------------------------------------------
+    
+    virus_symbols <- unique(
+      virus_data$SYMBOL
+    )
+    
+    
+    # --------------------------------------------------------
+    # KEGG
+    # --------------------------------------------------------
+    
+    kegg_result <- run_kegg_for_virus(
+      symbols = virus_symbols,
+      virus_name = virus
+    )
+    
+    
+    # --------------------------------------------------------
+    # IF NO RESULT
+    # --------------------------------------------------------
+    
+    if (nrow(kegg_result) == 0) {
+      
+      kegg_result <- data.frame(
+        Virus = virus,
+        Message = "No KEGG pathways returned",
+        stringsAsFactors = FALSE
+      )
+    }
+    
+    
+    # --------------------------------------------------------
+    # ADD TO EXCEL SHEET LIST
+    # --------------------------------------------------------
+    
+    kegg_sheets[[sheet_name_output]] <-
+      kegg_result
+  }
+  
+  
+  # ==========================================================
+  # WRITE ONE SINGLE EXCEL FILE
+  # ==========================================================
+  
+  cat("\n")
+  cat("Writing final Excel file...\n")
+  
+  
+  write.xlsx(
+    
+    kegg_sheets,
+    
+    file = output_file,
+    
+    overwrite = TRUE
+  )
+  
+  
+  cat("\n")
+  cat("############################################\n")
+  cat(
+    dataset_name,
+    " KEGG_ALL COMPLETED\n"
+  )
+  cat("############################################\n")
+  
+  cat(
+    "Output:\n",
+    output_file,
+    "\n"
+  )
+  
+}
+
+
+# ============================================================
+# 10. RUN SERUM
+# ============================================================
+
+process_dataset(
+  
+  input_file =
+    SERUM_FILE,
+  
+  sheet_name =
+    SERUM_SHEET,
+  
+  output_file =
+    SERUM_OUTPUT,
+  
+  dataset_name =
+    "SERUM"
+)
+
+
+# ============================================================
+# 11. RUN PLASMA
+# ============================================================
+
+process_dataset(
+  
+  input_file =
+    PLASMA_FILE,
+  
+  sheet_name =
+    PLASMA_SHEET,
+  
+  output_file =
+    PLASMA_OUTPUT,
+  
+  dataset_name =
+    "PLASMA"
+)
+
+
+# ============================================================
+# 12. FINISHED
+# ============================================================
+
+cat("\n")
+cat("############################################\n")
+cat("ALL KEGG ANALYSES COMPLETED\n")
+cat("############################################\n")
