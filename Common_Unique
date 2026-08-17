@@ -49,38 +49,55 @@ FILES = [
 VIRUS_COL = "Disease_(Virus)"
 SYMBOL_COL = "SYMBOL"
 REG_COL = "Differential_regulation_Discovery_Cohort"   # contains 'Up' / 'Down'
+PMID_COL = "PMID"
+PATIENTS_COL = "No_of_patients_in_discovery_cohort"
 # -----------------------------------------------------------------------
+
+
+def _joined_unique(series):
+    """Join unique, non-null values of a series into a sorted comma string."""
+    vals = sorted({str(v) for v in series.dropna()})
+    return ", ".join(vals)
 
 
 def analyze_direction(df: pd.DataFrame, direction: str):
     """
     Given the full dataframe and a direction ('Up' or 'Down'), return:
-      - common_df:  SYMBOL, Num_Viruses, Viruses (comma-separated) for
-                    symbols found in >=2 viruses for this direction
-      - unique_dict: {virus_name: DataFrame(SYMBOL)} for symbols found
+      - common_df:  SYMBOL, Num_Viruses, Viruses, PMIDs,
+                    No_of_patients_in_discovery_cohort for symbols found
+                    in >=2 viruses for this direction
+      - unique_dict: {virus_name: DataFrame(SYMBOL, PMIDs,
+                    No_of_patients_in_discovery_cohort)} for symbols found
                     in exactly 1 virus for this direction
     """
     sub = df[df[REG_COL].astype(str).str.strip().str.capitalize() == direction]
 
-    # unique (SYMBOL, virus) pairs -- avoids double counting duplicate rows
-    pairs = sub[[SYMBOL_COL, VIRUS_COL]].dropna().drop_duplicates()
+    cols = [SYMBOL_COL, VIRUS_COL, PMID_COL, PATIENTS_COL]
+    pairs = sub[cols].dropna(subset=[SYMBOL_COL, VIRUS_COL]).drop_duplicates()
 
-    # how many distinct viruses each symbol appears in (for this direction)
-    counts = pairs.groupby(SYMBOL_COL)[VIRUS_COL].agg(
-        Num_Viruses="nunique",
-        Viruses=lambda x: ", ".join(sorted(set(x)))
+    # --- Common: aggregate across ALL viruses per symbol ---
+    counts = pairs.groupby(SYMBOL_COL).agg(
+        Num_Viruses=(VIRUS_COL, "nunique"),
+        Viruses=(VIRUS_COL, lambda x: ", ".join(sorted(set(x)))),
+        PMIDs=(PMID_COL, _joined_unique),
+        No_of_patients_in_discovery_cohort=(PATIENTS_COL, _joined_unique),
     ).reset_index()
 
     common = counts[counts["Num_Viruses"] >= 2].sort_values(
         ["Num_Viruses", SYMBOL_COL], ascending=[False, True]
     ).reset_index(drop=True)
 
-    unique_symbols = counts[counts["Num_Viruses"] == 1].copy()
-    unique_symbols["Virus"] = unique_symbols["Viruses"]
+    # --- Unique: symbols found in exactly 1 virus ---
+    single_virus_symbols = counts[counts["Num_Viruses"] == 1][SYMBOL_COL]
+    unique_pairs = pairs[pairs[SYMBOL_COL].isin(single_virus_symbols)]
 
     unique_dict = {}
-    for virus, grp in unique_symbols.groupby("Virus"):
-        unique_dict[virus] = grp[[SYMBOL_COL]].sort_values(SYMBOL_COL).reset_index(drop=True)
+    for virus, grp in unique_pairs.groupby(VIRUS_COL):
+        per_symbol = grp.groupby(SYMBOL_COL).agg(
+            PMIDs=(PMID_COL, _joined_unique),
+            No_of_patients_in_discovery_cohort=(PATIENTS_COL, _joined_unique),
+        ).reset_index().sort_values(SYMBOL_COL).reset_index(drop=True)
+        unique_dict[virus] = per_symbol
 
     return common, unique_dict
 
@@ -105,13 +122,14 @@ def run_for_file(label, input_path, sheet_name, output_path):
 
             # 2) Unique symbols -- one sheet per virus, all combined into one
             #    sheet with a Virus column for easy filtering
+            unique_cols = [SYMBOL_COL, "Virus", "PMIDs", "No_of_patients_in_discovery_cohort"]
             if unique_dict:
                 combined_unique = pd.concat(
                     [df_.assign(Virus=virus) for virus, df_ in unique_dict.items()],
                     ignore_index=True
-                )[[SYMBOL_COL, "Virus"]]
+                )[unique_cols]
             else:
-                combined_unique = pd.DataFrame(columns=[SYMBOL_COL, "Virus"])
+                combined_unique = pd.DataFrame(columns=unique_cols)
 
             combined_unique.to_excel(writer, sheet_name=f"Unique_{direction}", index=False)
             print(f"  Unique {direction}: {len(combined_unique)} symbols across "
