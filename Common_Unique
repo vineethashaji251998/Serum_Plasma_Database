@@ -1,0 +1,131 @@
+"""
+common_unique_symbols.py
+
+Purpose
+-------
+For a "Diff_Virus_HC" style Excel file (one row per protein/virus observation,
+with columns 'Disease_(Virus)', 'SYMBOL', and
+'Differential_regulation_Discovery_Cohort' containing 'Up'/'Down'),
+this script finds, SEPARATELY for each Up/Down direction:
+
+  1. COMMON symbols  -> SYMBOLs regulated the same way (Up or Down) in
+                         2 or more viruses.
+  2. UNIQUE symbols   -> SYMBOLs regulated that way in exactly 1 virus,
+                         reported per virus.
+
+The script is run once per sample type (Plasma, Serum) -- just point
+INPUT_FILE at the relevant workbook and change OUTPUT_FILE / SHEET_NAME
+as needed, or use the batch loop at the bottom to do both in one go.
+
+Usage
+-----
+    python common_unique_symbols.py
+
+Edit the CONFIG section below to match your file paths / sheet names.
+Requires: pip install openpyxl pandas
+"""
+
+import pandas as pd
+from pathlib import Path
+
+# ------------------------- CONFIG ------------------------------------
+# List each input file with the sheet that holds the data, and where you
+# want the results workbook written.
+FILES = [
+    {
+        "label": "Plasma",
+        "input_path": r"D:\Ph.D\First_Objective\Devika_Reanalysis\Common_Unique\Plasma_Diff_Virus_HC.xlsx",
+        "sheet_name": "Plasma_HC",
+        "output_path": r"D:\Ph.D\First_Objective\Devika_Reanalysis\Common_Unique\Plasma_Common_Unique_Symbols.xlsx",
+    },
+    {
+        "label": "Serum",
+        "input_path": r"D:\Ph.D\First_Objective\Devika_Reanalysis\Common_Unique\Serum_Diff_Virus_HC.xlsx",
+        "sheet_name": "Serum_HC",   # <-- change if the sheet name differs
+        "output_path": r"D:\Ph.D\First_Objective\Devika_Reanalysis\Common_Unique\Serum_Common_Unique_Symbols.xlsx",
+    },
+]
+
+VIRUS_COL = "Disease_(Virus)"
+SYMBOL_COL = "SYMBOL"
+REG_COL = "Differential_regulation_Discovery_Cohort"   # contains 'Up' / 'Down'
+# -----------------------------------------------------------------------
+
+
+def analyze_direction(df: pd.DataFrame, direction: str):
+    """
+    Given the full dataframe and a direction ('Up' or 'Down'), return:
+      - common_df:  SYMBOL, Num_Viruses, Viruses (comma-separated) for
+                    symbols found in >=2 viruses for this direction
+      - unique_dict: {virus_name: DataFrame(SYMBOL)} for symbols found
+                    in exactly 1 virus for this direction
+    """
+    sub = df[df[REG_COL].astype(str).str.strip().str.capitalize() == direction]
+
+    # unique (SYMBOL, virus) pairs -- avoids double counting duplicate rows
+    pairs = sub[[SYMBOL_COL, VIRUS_COL]].dropna().drop_duplicates()
+
+    # how many distinct viruses each symbol appears in (for this direction)
+    counts = pairs.groupby(SYMBOL_COL)[VIRUS_COL].agg(
+        Num_Viruses="nunique",
+        Viruses=lambda x: ", ".join(sorted(set(x)))
+    ).reset_index()
+
+    common = counts[counts["Num_Viruses"] >= 2].sort_values(
+        ["Num_Viruses", SYMBOL_COL], ascending=[False, True]
+    ).reset_index(drop=True)
+
+    unique_symbols = counts[counts["Num_Viruses"] == 1].copy()
+    unique_symbols["Virus"] = unique_symbols["Viruses"]
+
+    unique_dict = {}
+    for virus, grp in unique_symbols.groupby("Virus"):
+        unique_dict[virus] = grp[[SYMBOL_COL]].sort_values(SYMBOL_COL).reset_index(drop=True)
+
+    return common, unique_dict
+
+
+def run_for_file(label, input_path, sheet_name, output_path):
+    print(f"\n=== Processing {label}: {input_path} ===")
+    df = pd.read_excel(input_path, sheet_name=sheet_name)
+
+    # basic sanity check on required columns
+    for col in (VIRUS_COL, SYMBOL_COL, REG_COL):
+        if col not in df.columns:
+            raise ValueError(f"Column '{col}' not found in {input_path}. "
+                              f"Available columns: {list(df.columns)}")
+
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        for direction in ["Up", "Down"]:
+            common_df, unique_dict = analyze_direction(df, direction)
+
+            # 1) Common symbols sheet
+            common_df.to_excel(writer, sheet_name=f"Common_{direction}", index=False)
+            print(f"  Common {direction}: {len(common_df)} symbols")
+
+            # 2) Unique symbols -- one sheet per virus, all combined into one
+            #    sheet with a Virus column for easy filtering
+            if unique_dict:
+                combined_unique = pd.concat(
+                    [df_.assign(Virus=virus) for virus, df_ in unique_dict.items()],
+                    ignore_index=True
+                )[[SYMBOL_COL, "Virus"]]
+            else:
+                combined_unique = pd.DataFrame(columns=[SYMBOL_COL, "Virus"])
+
+            combined_unique.to_excel(writer, sheet_name=f"Unique_{direction}", index=False)
+            print(f"  Unique {direction}: {len(combined_unique)} symbols across "
+                  f"{combined_unique['Virus'].nunique() if len(combined_unique) else 0} viruses")
+
+    print(f"  -> Saved: {output_path}")
+
+
+if __name__ == "__main__":
+    for f in FILES:
+        run_for_file(f["label"], f["input_path"], f["sheet_name"], f["output_path"])
+
+    print("\nDone. Each output workbook has 4 sheets:")
+    print("  Common_Up   - symbols Up in 2+ viruses (with virus list & count)")
+    print("  Common_Down - symbols Down in 2+ viruses (with virus list & count)")
+    print("  Unique_Up   - symbols Up in only 1 virus (Virus column shows which)")
+    print("  Unique_Down - symbols Down in only 1 virus (Virus column shows which)")
