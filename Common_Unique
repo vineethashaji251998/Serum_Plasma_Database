@@ -88,15 +88,20 @@ def analyze_direction(df: pd.DataFrame, direction: str):
     ).reset_index(drop=True)
 
     # --- Unique: symbols found in exactly 1 virus ---
+    # "Unique" status is still decided by Symbol+Virus (Num_Viruses == 1),
+    # but the output rows are NOT collapsed/joined -- each distinct
+    # Virus + PMID + Patient-cohort combination for that symbol gets its
+    # own row.
     single_virus_symbols = counts[counts["Num_Viruses"] == 1][SYMBOL_COL]
-    unique_pairs = pairs[pairs[SYMBOL_COL].isin(single_virus_symbols)]
+    unique_pairs = pairs[pairs[SYMBOL_COL].isin(single_virus_symbols)].drop_duplicates(
+        subset=[SYMBOL_COL, VIRUS_COL, PMID_COL, PATIENTS_COL]
+    )
 
     unique_dict = {}
     for virus, grp in unique_pairs.groupby(VIRUS_COL):
-        per_symbol = grp.groupby(SYMBOL_COL).agg(
-            PMIDs=(PMID_COL, _joined_unique),
-            No_of_patients_in_discovery_cohort=(PATIENTS_COL, _joined_unique),
-        ).reset_index().sort_values(SYMBOL_COL).reset_index(drop=True)
+        per_symbol = grp[[SYMBOL_COL, PMID_COL, PATIENTS_COL]].rename(
+            columns={PMID_COL: "PMIDs", PATIENTS_COL: "No_of_patients_in_discovery_cohort"}
+        ).sort_values([SYMBOL_COL, "No_of_patients_in_discovery_cohort"]).reset_index(drop=True)
         unique_dict[virus] = per_symbol
 
     return common, unique_dict
