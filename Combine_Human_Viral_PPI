@@ -1,0 +1,418 @@
+import os
+import pandas as pd
+from openpyxl import load_workbook
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+input_folder = r"D:\Ph.D\First_Objective\Devika_Reanalysis\Human_Viral_PPI"
+
+output_file = os.path.join(
+    input_folder,
+    "Human_Viral_PPI_Combined.xlsx"
+)
+
+# Only this Excel sheet will be considered
+TARGET_SHEET = "Total"
+
+# Required/common headers
+required_columns = [
+    "Database",
+    "Uniprot_ID_Human",
+    "Gene Name_Human",
+    "Gene symbol_Human",
+    "uniprot_ID_Virus",
+    "Gene Name_Virus",
+    "Gene symbol_Virus",
+    "Technique",
+    "PubMed",
+    "Taxon ID_Human",
+    "Taxon ID_Virus",
+    "Interaction type(s)"
+]
+
+
+# ============================================================
+# FUNCTION: STANDARDIZE COLUMN NAMES
+# ============================================================
+
+def clean_column_name(col):
+
+    col = str(col)
+
+    # Remove non-breaking spaces
+    col = col.replace("\xa0", " ")
+
+    # Remove line breaks
+    col = col.replace("\n", " ")
+
+    # Remove extra spaces
+    col = " ".join(col.split())
+
+    return col.strip()
+
+
+# ============================================================
+# FIND EXCEL FILES
+# ============================================================
+
+files = []
+
+for file in os.listdir(input_folder):
+
+    full_path = os.path.join(input_folder, file)
+
+    # Do not read the output file again
+    if file == os.path.basename(output_file):
+        continue
+
+    # Only Excel files
+    if file.lower().endswith((".xlsx", ".xls")):
+        files.append(full_path)
+
+
+print("\n========================================")
+print("FILES FOUND")
+print("========================================")
+
+for f in files:
+    print(os.path.basename(f))
+
+
+if len(files) == 0:
+
+    raise FileNotFoundError(
+        "No Excel files were found in the specified folder."
+    )
+
+
+# ============================================================
+# READ ONLY 'Total' SHEET
+# ============================================================
+
+all_data = []
+file_summary = []
+
+for file in files:
+
+    filename = os.path.basename(file)
+
+    print("\n----------------------------------------")
+    print("Reading:", filename)
+    print("----------------------------------------")
+
+    try:
+
+        # Read ONLY the Total sheet
+        df = pd.read_excel(
+            file,
+            sheet_name=TARGET_SHEET,
+            dtype=str
+        )
+
+        print("Total sheet found.")
+        print("Original rows:", len(df))
+
+        # ----------------------------------------------------
+        # CLEAN COLUMN NAMES
+        # ----------------------------------------------------
+
+        df.columns = [
+            clean_column_name(c)
+            for c in df.columns
+        ]
+
+        print("Columns found:")
+        print(list(df.columns))
+
+        # ----------------------------------------------------
+        # CHECK REQUIRED COLUMNS
+        # ----------------------------------------------------
+
+        available_columns = [
+            c for c in required_columns
+            if c in df.columns
+        ]
+
+        if len(available_columns) == 0:
+
+            print(
+                "WARNING: None of the required columns "
+                "were found. File skipped."
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # ADD MISSING REQUIRED COLUMNS
+        # ----------------------------------------------------
+
+        for col in required_columns:
+
+            if col not in df.columns:
+                df[col] = pd.NA
+
+        # ----------------------------------------------------
+        # SELECT ONLY REQUIRED COLUMNS
+        # ----------------------------------------------------
+
+        df = df[required_columns]
+
+        # ----------------------------------------------------
+        # REMOVE COMPLETELY EMPTY ROWS
+        # ----------------------------------------------------
+
+        df = df.dropna(
+            how="all",
+            subset=required_columns
+        )
+
+        # ----------------------------------------------------
+        # REPLACE EMPTY CELLS WITH NA
+        # ----------------------------------------------------
+
+        df[required_columns] = (
+            df[required_columns]
+            .replace(
+                r"^\s*$",
+                pd.NA,
+                regex=True
+            )
+        )
+
+        # ----------------------------------------------------
+        # ADD SOURCE FILE
+        # ----------------------------------------------------
+
+        df["Source_File"] = filename
+
+        # ----------------------------------------------------
+        # STORE DATA
+        # ----------------------------------------------------
+
+        all_data.append(df)
+
+        file_summary.append({
+            "File": filename,
+            "Sheet": TARGET_SHEET,
+            "Rows": len(df)
+        })
+
+        print("Rows retained:", len(df))
+
+    except ValueError:
+
+        print(
+            f"WARNING: Sheet '{TARGET_SHEET}' "
+            f"not found in {filename}. File skipped."
+        )
+
+    except Exception as e:
+
+        print(
+            f"ERROR reading {filename}: {e}"
+        )
+
+
+# ============================================================
+# CHECK WHETHER DATA WERE FOUND
+# ============================================================
+
+if len(all_data) == 0:
+
+    raise ValueError(
+        "No usable 'Total' sheets were found "
+        "in the input Excel files."
+    )
+
+
+# ============================================================
+# COMBINE ALL 'Total' SHEETS
+# ============================================================
+
+combined_data = pd.concat(
+    all_data,
+    ignore_index=True
+)
+
+
+print("\n========================================")
+print("COMBINATION COMPLETE")
+print("========================================")
+
+print(
+    "Total records:",
+    len(combined_data)
+)
+
+
+# ============================================================
+# CREATE UNIQUE DATASET
+# ============================================================
+
+unique_data = (
+    combined_data
+    .drop_duplicates(
+        subset=required_columns,
+        keep="first"
+    )
+    .reset_index(drop=True)
+)
+
+
+duplicate_count = (
+    len(combined_data)
+    - len(unique_data)
+)
+
+
+print(
+    "Unique records:",
+    len(unique_data)
+)
+
+print(
+    "Exact duplicate records:",
+    duplicate_count
+)
+
+
+# ============================================================
+# CREATE SUMMARY
+# ============================================================
+
+summary = pd.DataFrame(file_summary)
+
+summary_total = pd.DataFrame({
+
+    "Metric": [
+        "Number of input Excel files",
+        "Number of Total sheets successfully read",
+        "Total records",
+        "Total unique records",
+        "Exact duplicate records"
+    ],
+
+    "Value": [
+        len(files),
+        len(file_summary),
+        len(combined_data),
+        len(unique_data),
+        duplicate_count
+    ]
+})
+
+
+# ============================================================
+# SAVE TO EXCEL
+# ============================================================
+
+with pd.ExcelWriter(
+    output_file,
+    engine="openpyxl"
+) as writer:
+
+    # --------------------------------------------------------
+    # SHEET 1: ALL DATA
+    # --------------------------------------------------------
+
+    combined_data.to_excel(
+        writer,
+        sheet_name="All_Data",
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # SHEET 2: UNIQUE INTERACTIONS
+    # --------------------------------------------------------
+
+    unique_data.to_excel(
+        writer,
+        sheet_name="Unique_Interactions",
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # SHEET 3: SUMMARY
+    # --------------------------------------------------------
+
+    summary_total.to_excel(
+        writer,
+        sheet_name="Summary",
+        index=False,
+        startrow=0
+    )
+
+    # File-wise summary
+    start_row = len(summary_total) + 3
+
+    summary.to_excel(
+        writer,
+        sheet_name="Summary",
+        index=False,
+        startrow=start_row
+    )
+
+
+# ============================================================
+# FORMAT EXCEL
+# ============================================================
+
+wb = load_workbook(output_file)
+
+for ws in wb.worksheets:
+
+    # Freeze header
+    ws.freeze_panes = "A2"
+
+    # Auto filter
+    ws.auto_filter.ref = ws.dimensions
+
+    # Adjust column widths
+    for column_cells in ws.columns:
+
+        max_length = 0
+
+        for cell in column_cells:
+
+            if cell.value is not None:
+
+                max_length = max(
+                    max_length,
+                    len(str(cell.value))
+                )
+
+        adjusted_width = min(
+            max_length + 2,
+            40
+        )
+
+        ws.column_dimensions[
+            column_cells[0].column_letter
+        ].width = adjusted_width
+
+
+# Save
+wb.save(output_file)
+
+
+# ============================================================
+# FINAL OUTPUT
+# ============================================================
+
+print("\n========================================")
+print("DONE")
+print("========================================")
+
+print("\nOutput:")
+print(output_file)
+
+print("\nSheets created:")
+print("1. All_Data")
+print("2. Unique_Interactions")
+print("3. Summary")
+
+print("\nTotal records:", len(combined_data))
+print("Unique records:", len(unique_data))
+print("Duplicates:", duplicate_count)
