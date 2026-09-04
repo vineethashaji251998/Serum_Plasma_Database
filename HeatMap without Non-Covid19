@@ -1,0 +1,1606 @@
+# ============================================================
+# COVID-19 PROTEOMICS REANALYSIS
+# PMID: 35958562
+# DIRECTION-SPECIFIC DEP-BASED PROTEIN EXPRESSION HEATMAP
+# ============================================================
+
+# DEP criteria:
+#   P-value < 0.05
+#
+# Upregulated:
+#   log2FC > 0.5
+#
+# Downregulated:
+#   log2FC < -0.5
+#
+# IMPORTANT:
+#   No absolute log2FC filtering is used.
+#
+# Heatmap:
+#   Rows    = proteins
+#   Columns = biological conditions
+#   Values  = mean heatmap-only normalized protein expression
+#
+# Values are row-wise Z-scored across the six displayed conditions.
+# Non-COVID-19 samples are excluded from the entire analysis.
+# They are removed before LIMMA/DEP tables and heatmap generation.
+# ============================================================
+
+
+# ============================================================
+# 1. PACKAGES
+# ============================================================
+
+# limma is a Bioconductor package; install it through BiocManager.
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("limma", quietly = TRUE)) {
+  BiocManager::install("limma", ask = FALSE, update = FALSE)
+}
+
+if (!requireNamespace("pheatmap", quietly = TRUE)) {
+  install.packages("pheatmap")
+}
+
+if (!requireNamespace("svglite", quietly = TRUE)) {
+  install.packages("svglite")
+}
+
+library(limma)
+library(pheatmap)
+
+
+# ============================================================
+# 2. INPUT FILES
+# ============================================================
+
+input_expression <- paste0(
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/",
+  "Covid_19_data/35958562/Metadata_1_35958562.csv"
+)
+
+input_metadata <- paste0(
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/",
+  "Covid_19_data/35958562/35958562_Data_1.csv"
+)
+
+
+# ============================================================
+# 3. OUTPUT DIRECTORY
+# ============================================================
+
+# Results will be saved in a NEW folder.
+# Original input files will not be overwritten.
+
+# IMPORTANT:
+# All result files and the three heatmap figures are written here.
+output_dir <- file.path(
+  dirname(input_expression),
+  "DEP_Analysis_P0.05_DirectionalLogFC0.5"
+)
+
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE, showWarnings = TRUE)
+}
+
+if (!dir.exists(output_dir)) {
+  stop(
+    paste0(
+      "Could not create output directory:\n",
+      output_dir,
+      "\nPlease check that you have write permission for this folder."
+    )
+  )
+}
+
+cat(
+  "Output directory confirmed:\n",
+  normalizePath(output_dir, winslash = "/", mustWork = FALSE),
+  "\n"
+)
+
+cat(
+  "Analysis output folder:\n",
+  output_dir,
+  "\n"
+)
+
+
+# ============================================================
+# 4. CUTOFFS
+# ============================================================
+
+PVAL_THRESHOLD <- 0.05
+
+# Direction-specific logFC thresholds
+UP_LOGFC_THRESHOLD <- 0.5
+DOWN_LOGFC_THRESHOLD <- -0.5
+
+
+# ============================================================
+# 5. CONDITION ORDER
+# ============================================================
+
+condition_levels <- c(
+  "Healthy",
+  "Asymptomatic",
+  "Mild",
+  "Moderate",
+  "Severe",
+  "Critical"
+)
+
+
+# ============================================================
+# 6. READ DATA
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("READING INPUT DATA\n")
+cat("============================================================\n")
+
+expr_raw <- read.csv(
+  input_expression,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+metadata <- read.csv(
+  input_metadata,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+
+# ============================================================
+# 7. CHECK REQUIRED COLUMNS
+# ============================================================
+
+if (!"GeneName" %in% colnames(expr_raw)) {
+  stop(
+    "GeneName column was not found in the expression file."
+  )
+}
+
+if (!"SampleID" %in% colnames(metadata)) {
+  stop(
+    "SampleID column was not found in the metadata file."
+  )
+}
+
+if (!"Condition" %in% colnames(metadata)) {
+  stop(
+    "Condition column was not found in the metadata file."
+  )
+}
+
+
+# ============================================================
+# 8. STANDARDIZE CONDITION NAMES
+# ============================================================
+
+metadata$Condition <- trimws(
+  as.character(metadata$Condition)
+)
+
+metadata$Condition[
+  tolower(metadata$Condition) == "healthy"
+] <- "Healthy"
+
+metadata$Condition[
+  tolower(metadata$Condition) == "non-covid-19"
+] <- "Non-COVID-19"
+
+cat("\nOriginal condition distribution:\n")
+print(
+  table(
+    metadata$Condition,
+    useNA = "ifany"
+  )
+)
+
+# ------------------------------------------------------------
+# EXCLUDE NON-COVID-19 SAMPLES FROM THE ENTIRE ANALYSIS
+# ------------------------------------------------------------
+noncovid_samples <- metadata$SampleID[
+  metadata$Condition == "Non-COVID-19"
+]
+
+cat(
+  "\nNon-COVID-19 samples identified:",
+  length(noncovid_samples),
+  "\n"
+)
+
+metadata <- metadata[
+  metadata$Condition != "Non-COVID-19",
+  ,
+  drop = FALSE
+]
+
+metadata$Condition <- factor(
+  metadata$Condition,
+  levels = condition_levels
+)
+
+cat("\nConditions retained for LIMMA/DEP and heatmap:\n")
+print(
+  table(
+    metadata$Condition,
+    useNA = "ifany"
+  )
+)
+
+if (any(is.na(metadata$Condition))) {
+  stop(
+    "Some metadata samples have conditions that do not match the expected condition levels."
+  )
+}
+
+
+# ============================================================
+# 9. PREPARE EXPRESSION MATRIX
+# ============================================================
+
+protein_names <- trimws(
+  as.character(expr_raw$GeneName)
+)
+
+valid_proteins <- !is.na(protein_names) &
+  protein_names != ""
+
+expr_raw <- expr_raw[
+  valid_proteins,
+  ,
+  drop = FALSE
+]
+
+protein_names <- protein_names[
+  valid_proteins
+]
+
+expr_values <- expr_raw[
+  ,
+  setdiff(
+    colnames(expr_raw),
+    "GeneName"
+  ),
+  drop = FALSE
+]
+
+# Convert expression columns to numeric
+expr_values[] <- lapply(
+  expr_values,
+  function(x) {
+    as.numeric(
+      as.character(x)
+    )
+  }
+)
+
+expr_matrix <- as.matrix(
+  expr_values
+)
+
+rownames(expr_matrix) <- protein_names
+
+
+# ============================================================
+# 10. MATCH EXPRESSION SAMPLES WITH METADATA
+# ============================================================
+
+common_samples <- intersect(
+  colnames(expr_matrix),
+  as.character(metadata$SampleID)
+)
+
+if (length(common_samples) == 0) {
+  stop(
+    "No common sample IDs were found between expression data and metadata."
+  )
+}
+
+expr_matrix <- expr_matrix[
+  ,
+  common_samples,
+  drop = FALSE
+]
+
+metadata <- metadata[
+  match(
+    common_samples,
+    metadata$SampleID
+  ),
+  ,
+  drop = FALSE
+]
+
+rownames(metadata) <- metadata$SampleID
+
+metadata$Condition <- factor(
+  as.character(metadata$Condition),
+  levels = condition_levels
+)
+
+cat("\n")
+cat(
+  "Common samples:",
+  length(common_samples),
+  "\n"
+)
+
+cat("\nFinal condition distribution:\n")
+
+print(
+  table(
+    metadata$Condition
+  )
+)
+
+
+# ============================================================
+# 11. FILTER PROTEINS BY DETECTION
+# Minimum 70% detection
+# ============================================================
+
+detection_fraction <- rowMeans(
+  !is.na(expr_matrix)
+)
+
+keep_proteins <- detection_fraction >= 0.70
+
+expr_matrix <- expr_matrix[
+  keep_proteins,
+  ,
+  drop = FALSE
+]
+
+cat(
+  "\nProteins after 70% detection filtering:",
+  nrow(expr_matrix),
+  "\n"
+)
+
+
+# ============================================================
+# 12. REMOVE DUPLICATE PROTEIN SYMBOLS
+# Keep protein with highest mean expression
+# ============================================================
+
+protein_mean <- rowMeans(
+  expr_matrix,
+  na.rm = TRUE
+)
+
+duplicate_groups <- split(
+  seq_len(nrow(expr_matrix)),
+  rownames(expr_matrix)
+)
+
+keep_indices <- vapply(
+  duplicate_groups,
+  function(idx) {
+    
+    idx[
+      which.max(
+        protein_mean[idx]
+      )
+    ]
+    
+  },
+  integer(1)
+)
+
+expr_matrix <- expr_matrix[
+  keep_indices,
+  ,
+  drop = FALSE
+]
+
+cat(
+  "Proteins after duplicate removal:",
+  nrow(expr_matrix),
+  "\n"
+)
+
+
+# ============================================================
+# 13. LOG2 TRANSFORMATION
+# ============================================================
+
+finite_values <- expr_matrix[
+  is.finite(expr_matrix)
+]
+
+if (length(finite_values) == 0) {
+  stop(
+    "Expression matrix contains no finite numeric values."
+  )
+}
+
+if (max(finite_values, na.rm = TRUE) > 100) {
+  
+  cat(
+    "\nApplying log2 transformation...\n"
+  )
+  
+  expr_matrix <- log2(
+    expr_matrix + 1
+  )
+  
+} else {
+  
+  cat(
+    "\nExpression data appear to already be on a log2-like scale.\n"
+  )
+  
+}
+
+
+# ============================================================
+# 14. IMPUTE MISSING VALUES
+# Protein-wise minimum
+# ============================================================
+
+for (i in seq_len(nrow(expr_matrix))) {
+  
+  missing <- is.na(
+    expr_matrix[i, ]
+  )
+  
+  if (any(missing)) {
+    
+    protein_min <- min(
+      expr_matrix[i, !missing],
+      na.rm = TRUE
+    )
+    
+    expr_matrix[i, missing] <- protein_min
+    
+  }
+}
+
+
+# ============================================================
+# 15. QUANTILE NORMALIZATION
+# ============================================================
+
+cat(
+  "\nApplying quantile normalization...\n"
+)
+
+expr_normalized <- normalizeBetweenArrays(
+  expr_matrix,
+  method = "quantile"
+)
+
+rownames(expr_normalized) <- rownames(
+  expr_matrix
+)
+
+colnames(expr_normalized) <- colnames(
+  expr_matrix
+)
+
+
+# ============================================================
+# 16. LIMMA DESIGN
+# ============================================================
+
+metadata$Condition <- factor(
+  metadata$Condition,
+  levels = condition_levels
+)
+
+design <- model.matrix(
+  ~ 0 + Condition,
+  data = metadata
+)
+
+colnames(design) <- condition_levels
+
+# makeContrasts() requires syntactically valid names.
+# This changes only the design matrix column name.
+
+colnames(design) <- make.names(
+  colnames(design)
+)
+
+cat(
+  "\nDesign matrix columns used for LIMMA:\n"
+)
+
+print(
+  colnames(design)
+)
+
+
+# ============================================================
+# 17. LIMMA MODEL
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("RUNNING LIMMA DIFFERENTIAL EXPRESSION ANALYSIS\n")
+cat("============================================================\n")
+
+fit <- lmFit(
+  expr_normalized,
+  design
+)
+
+
+# ============================================================
+# 18. DEFINE CONDITION-VS-HEALTHY CONTRASTS
+# ============================================================
+
+contrast_matrix <- makeContrasts(
+  
+  Asymptomatic_vs_Healthy =
+    Asymptomatic - Healthy,
+  
+  Mild_vs_Healthy =
+    Mild - Healthy,
+  
+  Moderate_vs_Healthy =
+    Moderate - Healthy,
+  
+  Severe_vs_Healthy =
+    Severe - Healthy,
+  
+  Critical_vs_Healthy =
+    Critical - Healthy,
+  
+  levels = design
+)
+
+
+# ============================================================
+# 19. COLLECT DIRECTION-SPECIFIC DEPs
+# ============================================================
+
+all_DEP_list <- list()
+
+all_result_list <- list()
+
+
+for (
+  contrast_name in colnames(contrast_matrix)
+) {
+  
+  cat("\n")
+  cat("------------------------------------------------------------\n")
+  cat(
+    "Comparison:",
+    contrast_name,
+    "\n"
+  )
+  cat("------------------------------------------------------------\n")
+  
+  # ----------------------------------------------------------
+  # Apply contrast
+  # ----------------------------------------------------------
+  
+  fit_contrast <- contrasts.fit(
+    fit,
+    contrast_matrix[
+      ,
+      contrast_name
+    ]
+  )
+  
+  fit_contrast <- eBayes(
+    fit_contrast
+  )
+  
+  # ----------------------------------------------------------
+  # Obtain all LIMMA results
+  # ----------------------------------------------------------
+  
+  results <- topTable(
+    fit_contrast,
+    number = Inf,
+    adjust.method = "BH",
+    sort.by = "P"
+  )
+  
+  results$Protein <- rownames(
+    results
+  )
+  
+  results$Comparison <- contrast_name
+  
+  all_result_list[[contrast_name]] <- results
+  
+  # ----------------------------------------------------------
+  # UPREGULATED
+  #
+  # P.Value < 0.05
+  # AND
+  # logFC > +0.5
+  # ----------------------------------------------------------
+  
+  Up_results <- results[
+    !is.na(results$P.Value) &
+      !is.na(results$logFC) &
+      results$P.Value < PVAL_THRESHOLD &
+      results$logFC > UP_LOGFC_THRESHOLD,
+    ,
+    drop = FALSE
+  ]
+  
+  Up_results$Regulation <- "Up"
+  
+  # ----------------------------------------------------------
+  # DOWNREGULATED
+  #
+  # P.Value < 0.05
+  # AND
+  # logFC < -0.5
+  # ----------------------------------------------------------
+  
+  Down_results <- results[
+    !is.na(results$P.Value) &
+      !is.na(results$logFC) &
+      results$P.Value < PVAL_THRESHOLD &
+      results$logFC < DOWN_LOGFC_THRESHOLD,
+    ,
+    drop = FALSE
+  ]
+  
+  Down_results$Regulation <- "Down"
+  
+  # ----------------------------------------------------------
+  # COMBINE UP + DOWN
+  # ----------------------------------------------------------
+  
+  DEP_results <- rbind(
+    Up_results,
+    Down_results
+  )
+  
+  all_DEP_list[[contrast_name]] <- DEP_results
+  
+  # ----------------------------------------------------------
+  # PRINT SUMMARY
+  # ----------------------------------------------------------
+  
+  cat(
+    "Total significant DEPs:",
+    nrow(DEP_results),
+    "\n"
+  )
+  
+  cat(
+    "Upregulated:",
+    nrow(Up_results),
+    "\n"
+  )
+  
+  cat(
+    "Downregulated:",
+    nrow(Down_results),
+    "\n"
+  )
+  
+  # ----------------------------------------------------------
+  # SAVE ALL LIMMA RESULTS
+  # ----------------------------------------------------------
+  
+  write.csv(
+    results,
+    file.path(
+      output_dir,
+      paste0(
+        "LIMMA_",
+        contrast_name,
+        "_All_Proteins.csv"
+      )
+    ),
+    row.names = FALSE
+  )
+  
+  # ----------------------------------------------------------
+  # SAVE DEP RESULTS
+  # ----------------------------------------------------------
+  
+  write.csv(
+    DEP_results,
+    file.path(
+      output_dir,
+      paste0(
+        "DEP_",
+        contrast_name,
+        "_P0.05_DirectionalLogFC.csv"
+      )
+    ),
+    row.names = FALSE
+  )
+  
+}
+
+
+# ============================================================
+# 20. COMBINE ALL LIMMA RESULTS
+# ============================================================
+
+all_LIMMA_results <- do.call(
+  rbind,
+  all_result_list
+)
+
+write.csv(
+  all_LIMMA_results,
+  file.path(
+    output_dir,
+    "LIMMA_All_Comparisons_All_Proteins.csv"
+  ),
+  row.names = FALSE
+)
+
+
+# ============================================================
+# 21. COMBINE ALL DEPs
+# ============================================================
+
+non_empty_DEP_list <- all_DEP_list[
+  vapply(
+    all_DEP_list,
+    nrow,
+    integer(1)
+  ) > 0
+]
+
+if (
+  length(non_empty_DEP_list) == 0
+) {
+  
+  stop(
+    paste0(
+      "No DEPs were identified using ",
+      "P < 0.05 with logFC > +0.5 ",
+      "or logFC < -0.5."
+    )
+  )
+  
+}
+
+all_DEPs <- do.call(
+  rbind,
+  non_empty_DEP_list
+)
+
+
+# ============================================================
+# 22. SAVE ALL DEP RESULTS
+# ============================================================
+
+write.csv(
+  all_DEPs,
+  file.path(
+    output_dir,
+    "All_DEPs_All_Comparisons_P0.05_DirectionalLogFC.csv"
+  ),
+  row.names = FALSE
+)
+
+
+# ============================================================
+# 23. CREATE UNIQUE DEP LIST
+# ============================================================
+
+DEP_proteins <- unique(
+  all_DEPs$Protein
+)
+
+cat("\n")
+cat("============================================================\n")
+cat("DEP SUMMARY\n")
+cat("============================================================\n")
+
+cat(
+  "Total DEP entries across comparisons:",
+  nrow(all_DEPs),
+  "\n"
+)
+
+cat(
+  "Total unique DEP proteins:",
+  length(DEP_proteins),
+  "\n"
+)
+
+
+# ------------------------------------------------------------
+# Count unique UP and DOWN proteins
+# ------------------------------------------------------------
+
+unique_up_proteins <- unique(
+  all_DEPs$Protein[
+    all_DEPs$Regulation == "Up"
+  ]
+)
+
+unique_down_proteins <- unique(
+  all_DEPs$Protein[
+    all_DEPs$Regulation == "Down"
+  ]
+)
+
+cat(
+  "Unique upregulated proteins:",
+  length(unique_up_proteins),
+  "\n"
+)
+
+cat(
+  "Unique downregulated proteins:",
+  length(unique_down_proteins),
+  "\n"
+)
+
+
+# ============================================================
+# 24. SAVE UNIQUE DEP LIST
+# ============================================================
+
+write.csv(
+  data.frame(
+    Protein = DEP_proteins
+  ),
+  file.path(
+    output_dir,
+    "Unique_DEP_Protein_List_P0.05_DirectionalLogFC.csv"
+  ),
+  row.names = FALSE
+)
+
+
+# ============================================================
+# 25. CREATE PROTEIN EXPRESSION HEATMAP MATRIX
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("CREATING PROTEIN EXPRESSION HEATMAP MATRIX\n")
+cat("============================================================\n")
+
+# ------------------------------------------------------------
+# HEATMAP CONDITIONS
+# ------------------------------------------------------------
+# Non-COVID-19 has already been excluded from the entire analysis.
+# The heatmap therefore contains these six conditions only.
+# ------------------------------------------------------------
+
+heatmap_conditions <- c(
+  "Asymptomatic",
+  "Mild",
+  "Moderate",
+  "Severe",
+  "Critical",
+  "Healthy"
+)
+
+# Verify that all heatmap conditions are represented.
+missing_heatmap_conditions <- setdiff(
+  heatmap_conditions,
+  as.character(unique(metadata$Condition))
+)
+
+if (length(missing_heatmap_conditions) > 0) {
+  stop(
+    "The following heatmap conditions are missing from the retained metadata: ",
+    paste(missing_heatmap_conditions, collapse = ", ")
+  )
+}
+
+# ------------------------------------------------------------
+# HEATMAP SAMPLE CHECK
+# ------------------------------------------------------------
+heatmap_samples <- rownames(metadata)[
+  !is.na(metadata$Condition) &
+    as.character(metadata$Condition) %in% heatmap_conditions
+]
+
+heatmap_samples <- intersect(
+  heatmap_samples,
+  colnames(expr_normalized)
+)
+
+if (length(heatmap_samples) == 0) {
+  stop("No samples were found for the heatmap conditions.")
+}
+
+heatmap_sample_conditions <- as.character(
+  metadata[heatmap_samples, "Condition"]
+)
+
+if (any(heatmap_sample_conditions == "Non-COVID-19")) {
+  stop("ERROR: Non-COVID-19 samples are present in the heatmap sample set.")
+}
+
+cat("\nHeatmap sample counts by condition:\n")
+print(
+  table(
+    factor(
+      heatmap_sample_conditions,
+      levels = heatmap_conditions
+    )
+  )
+)
+
+# ------------------------------------------------------------
+# HEATMAP EXPRESSION MATRIX
+# ------------------------------------------------------------
+# Since Non-COVID-19 samples were removed BEFORE normalization,
+# expr_normalized is normalized using only the six retained
+# conditions. No Non-COVID-19 sample can influence the heatmap.
+# ------------------------------------------------------------
+
+heatmap_expr_normalized <- expr_normalized[
+  ,
+  heatmap_samples,
+  drop = FALSE
+]
+
+# Keep the exact biological condition order requested.
+heatmap_condition_factor <- factor(
+  heatmap_sample_conditions,
+  levels = heatmap_conditions
+)
+
+# ------------------------------------------------------------
+# CONDITION-LEVEL MEAN EXPRESSION
+# ------------------------------------------------------------
+expression_heatmap_raw <- matrix(
+  NA_real_,
+  nrow = length(DEP_proteins),
+  ncol = length(heatmap_conditions)
+)
+
+rownames(expression_heatmap_raw) <- DEP_proteins
+colnames(expression_heatmap_raw) <- heatmap_conditions
+
+for (condition in heatmap_conditions) {
+
+  condition_samples <- heatmap_samples[
+    heatmap_condition_factor == condition
+  ]
+
+  condition_samples <- intersect(
+    condition_samples,
+    colnames(heatmap_expr_normalized)
+  )
+
+  if (length(condition_samples) > 0) {
+
+    expression_heatmap_raw[, condition] <- rowMeans(
+      heatmap_expr_normalized[
+        DEP_proteins,
+        condition_samples,
+        drop = FALSE
+      ],
+      na.rm = TRUE
+    )
+
+  }
+}
+
+# Convert Inf/-Inf produced by rowMeans when appropriate to NA.
+expression_heatmap_raw[
+  !is.finite(expression_heatmap_raw)
+] <- NA_real_
+
+# ------------------------------------------------------------
+# ROW-WISE Z-SCORE
+# ------------------------------------------------------------
+expression_heatmap_z <- t(
+  apply(
+    expression_heatmap_raw,
+    1,
+    function(x) {
+
+      if (all(is.na(x))) {
+        return(rep(NA_real_, length(x)))
+      }
+
+      row_mean <- mean(x, na.rm = TRUE)
+      row_sd <- sd(x, na.rm = TRUE)
+
+      if (is.na(row_sd) || row_sd == 0) {
+        return(rep(0, length(x)))
+      }
+
+      (x - row_mean) / row_sd
+    }
+  )
+)
+
+rownames(expression_heatmap_z) <- rownames(
+  expression_heatmap_raw
+)
+
+colnames(expression_heatmap_z) <- colnames(
+  expression_heatmap_raw
+)
+
+# Remove proteins that cannot be displayed.
+expression_heatmap_z <- expression_heatmap_z[
+  rowSums(!is.na(expression_heatmap_z)) > 0,
+  ,
+  drop = FALSE
+]
+
+# ------------------------------------------------------------
+# SAVE HEATMAP TABLES
+# ------------------------------------------------------------
+expression_raw_output <- data.frame(
+  Protein = rownames(expression_heatmap_raw),
+  expression_heatmap_raw,
+  check.names = FALSE
+)
+
+write.csv(
+  expression_raw_output,
+  file.path(
+    output_dir,
+    "DEP_Mean_Protein_Expression_By_Condition.csv"
+  ),
+  row.names = FALSE
+)
+
+expression_z_output <- data.frame(
+  Protein = rownames(expression_heatmap_z),
+  expression_heatmap_z,
+  check.names = FALSE
+)
+
+write.csv(
+  expression_z_output,
+  file.path(
+    output_dir,
+    "DEP_Protein_Expression_RowScaled_Heatmap_Matrix.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  data.frame(
+    Protein = rownames(expression_heatmap_z)
+  ),
+  file.path(
+    output_dir,
+    "DEP_Protein_Expression_Heatmap_Final_Protein_List.csv"
+  ),
+  row.names = FALSE
+)
+
+# ============================================================
+# 31. HEATMAP DIMENSIONS
+# ============================================================
+
+n_proteins <- nrow(
+  expression_heatmap_z
+)
+
+n_conditions <- ncol(
+  expression_heatmap_z
+)
+
+heatmap_width <- 16
+
+heatmap_height <- max(
+  20,
+  n_proteins * 0.18
+)
+
+heatmap_height <- min(
+  heatmap_height,
+  100
+)
+
+heatmap_raster_height <- heatmap_height
+
+
+# ============================================================
+# 32. PROTEIN LABEL FONT SIZE
+# ============================================================
+
+if (
+  n_proteins <= 100
+) {
+
+  protein_fontsize <- 10
+
+} else if (
+  n_proteins <= 250
+) {
+
+  protein_fontsize <- 8
+
+} else if (
+  n_proteins <= 500
+) {
+
+  protein_fontsize <- 6
+
+} else if (
+  n_proteins <= 1000
+) {
+
+  protein_fontsize <- 5
+
+} else {
+
+  protein_fontsize <- 4
+
+}
+
+
+# ============================================================
+# 33. HEATMAP TITLE
+# ============================================================
+
+heatmap_title <- paste0(
+  "Protein Expression Heatmap\n",
+  n_proteins,
+  " DEPs (P < 0.05; Up: log2FC > 0.5; ",
+  "Down: log2FC < -0.5)"
+)
+
+
+# ============================================================
+# 34. HEATMAP COLOUR SCALE
+# ============================================================
+
+# Yellow/green = relatively high values
+# Blue          = relatively low values
+# White         = missing values
+#
+# Scale is fixed from -2 to +2 as requested.
+
+heatmap_colors <- colorRampPalette(
+  c(
+    "#FFFFD9",  # light yellow
+    "#EDF8B1",
+    "#C7E9B4",
+    "#7FCDBB",
+    "#41B6C4",
+    "#2C7FB8",
+    "#253494"   # dark blue
+  )
+)(100)
+
+
+# ============================================================
+# 35. FUNCTION TO GENERATE PROTEIN EXPRESSION HEATMAP
+# ============================================================
+
+# Use a temporary complete matrix only for clustering.
+# The displayed matrix remains the original row-scaled
+# expression matrix.
+
+cluster_matrix <- expression_heatmap_z
+cluster_matrix[is.na(cluster_matrix)] <- 0
+
+if (nrow(cluster_matrix) > 1) {
+
+  row_hclust <- hclust(
+    dist(
+      cluster_matrix,
+      method = "euclidean"
+    ),
+    method = "complete"
+  )
+
+} else {
+
+  row_hclust <- FALSE
+
+}
+
+
+make_DEP_heatmap <- function() {
+
+  pheatmap(
+
+    expression_heatmap_z,
+
+    # Cluster proteins, not samples
+    cluster_rows = row_hclust,
+
+    # Conditions remain in biological order
+    cluster_cols = FALSE,
+
+    show_rownames = TRUE,
+    show_colnames = TRUE,
+
+    fontsize_row = protein_fontsize,
+    fontsize_col = 10,
+    fontsize = 10,
+
+    border_color = NA,
+
+    # Values are already row-scaled
+    scale = "none",
+
+    # Missing values are white
+    na_col = "white",
+
+    color = heatmap_colors,
+
+    # EXACT requested scale: -2, -1, 0, 1, 2
+    breaks = seq(
+      -2,
+      2,
+      length.out = 101
+    ),
+
+    legend_breaks = c(
+      -2,
+      -1,
+      0,
+      1,
+      2
+    ),
+
+    legend_labels = c(
+      "-2",
+      "-1",
+      "0",
+      "1",
+      "2"
+    ),
+
+    treeheight_row = ifelse(
+      nrow(expression_heatmap_z) > 1,
+      100,
+      0
+    ),
+
+    treeheight_col = 0,
+
+    main = heatmap_title
+
+  )
+
+}
+
+
+# 36. PDF / SVG / PNG / JPEG HEATMAP OUTPUT
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("GENERATING HEATMAP FILES\n")
+cat("============================================================\n")
+
+# Make sure the output directory exists before opening graphics devices
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE, showWarnings = TRUE)
+}
+
+if (!dir.exists(output_dir)) {
+  stop("Output directory could not be created: ", output_dir)
+}
+
+# ------------------------------------------------------------
+# File names
+# ------------------------------------------------------------
+
+heatmap_pdf <- file.path(
+  output_dir,
+  "DEP_Significant_Log2FC_Heatmap.pdf"
+)
+
+heatmap_svg <- file.path(
+  output_dir,
+  "DEP_Significant_Log2FC_Heatmap.svg"
+)
+
+heatmap_png <- file.path(
+  output_dir,
+  "DEP_Significant_Log2FC_Heatmap.png"
+)
+
+heatmap_jpeg <- file.path(
+  output_dir,
+  "DEP_Significant_Log2FC_Heatmap.jpg"
+)
+
+# ------------------------------------------------------------
+# Helper function
+# ------------------------------------------------------------
+
+check_output_file <- function(file_path) {
+
+  if (!file.exists(file_path)) {
+    stop(
+      paste0(
+        "\nERROR: Heatmap file was NOT created:\n",
+        file_path
+      )
+    )
+  }
+
+  if (file.info(file_path)$size == 0) {
+    stop(
+      paste0(
+        "\nERROR: Heatmap file is empty:\n",
+        file_path
+      )
+    )
+  }
+
+  cat(
+    "Created: ",
+    normalizePath(
+      file_path,
+      winslash = "/",
+      mustWork = FALSE
+    ),
+    "\n",
+    sep = ""
+  )
+}
+
+
+# ============================================================
+# 36A. PDF
+# ============================================================
+
+cat("\nCreating PDF heatmap...\n")
+
+pdf(
+  file = heatmap_pdf,
+  width = heatmap_width,
+  height = heatmap_height,
+  onefile = TRUE
+)
+
+make_DEP_heatmap()
+
+dev.off()
+
+check_output_file(heatmap_pdf)
+
+
+# ============================================================
+# 36B. SVG
+# ============================================================
+
+cat("\nCreating SVG heatmap...\n")
+
+# Use svglite only for SVG generation
+svglite::svglite(
+  file = heatmap_svg,
+  width = heatmap_width,
+  height = heatmap_height
+)
+
+make_DEP_heatmap()
+
+dev.off()
+
+check_output_file(heatmap_svg)
+
+
+# ============================================================
+# 36C. PNG
+# ============================================================
+
+cat("\nCreating PNG heatmap...\n")
+
+# Full heatmap height is used so proteins are not vertically cropped
+png(
+  filename = heatmap_png,
+  width = heatmap_width,
+  height = heatmap_height,
+  units = "in",
+  res = 300
+)
+
+make_DEP_heatmap()
+
+dev.off()
+
+check_output_file(heatmap_png)
+
+
+# ============================================================
+# 36D. JPEG
+# ============================================================
+
+cat("\nCreating JPEG heatmap...\n")
+
+jpeg(
+  filename = heatmap_jpeg,
+  width = heatmap_width,
+  height = heatmap_height,
+  units = "in",
+  res = 300,
+  quality = 100
+)
+
+make_DEP_heatmap()
+
+dev.off()
+
+check_output_file(heatmap_jpeg)
+
+
+# ============================================================
+# FINAL FIGURE LOCATIONS
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("HEATMAP FILES SUCCESSFULLY GENERATED\n")
+cat("============================================================\n")
+
+cat(
+  "PDF  : ",
+  normalizePath(heatmap_pdf, winslash = "/", mustWork = FALSE),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "SVG  : ",
+  normalizePath(heatmap_svg, winslash = "/", mustWork = FALSE),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "PNG  : ",
+  normalizePath(heatmap_png, winslash = "/", mustWork = FALSE),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "JPEG : ",
+  normalizePath(heatmap_jpeg, winslash = "/", mustWork = FALSE),
+  "\n",
+  sep = ""
+)
+
+
+# ============================================================
+# 37. FINAL SUMMARY
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("DIRECTION-SPECIFIC DEP LOG2FC HEATMAP COMPLETED\n")
+cat("============================================================\n")
+
+cat(
+  "P-value cutoff: < 0.05\n"
+)
+
+cat(
+  "Upregulated cutoff: log2FC > +0.5\n"
+)
+
+cat(
+  "Downregulated cutoff: log2FC < -0.5\n"
+)
+
+cat(
+  "Absolute log2FC filtering: NOT USED\n"
+)
+
+cat(
+  "Unique DEP proteins:",
+  length(DEP_proteins),
+  "\n"
+)
+
+cat(
+  "Unique upregulated proteins:",
+  length(unique_up_proteins),
+  "\n"
+)
+
+cat(
+  "Unique downregulated proteins:",
+  length(unique_down_proteins),
+  "\n"
+)
+
+cat(
+  "Final proteins in protein expression heatmap:",
+  n_proteins,
+  "\n"
+)
+
+cat(
+  "Conditions in heatmap:",
+  n_conditions,
+  "\n"
+)
+
+cat(
+  "Protein clustering: YES (NA treated as 0 for clustering only)\n"
+)
+
+cat(
+  "Comparison clustering: NO\n"
+)
+
+cat(
+  "Heatmap values: ROW-SCALED MEAN NORMALIZED PROTEIN EXPRESSION BY CONDITION\n"
+)
+
+cat(
+  "Heatmap unit: row-wise Z-score of mean normalized protein expression\n"
+)
+
+cat(
+  "Heatmap colour scale: -2, -1, 0, 1, 2; yellow/green = high, blue = low, white = missing\n"
+)
+
+cat(
+  "Output folder:",
+  output_dir,
+  "\n"
+)
+
+cat("\nFiles generated:\n")
+
+cat(
+  "  1. Individual LIMMA results for each comparison\n"
+)
+
+cat(
+  "  2. Individual directional DEP results for each comparison\n"
+)
+
+cat(
+  "  3. LIMMA_All_Comparisons_All_Proteins.csv\n"
+)
+
+cat(
+  "  4. All_DEPs_All_Comparisons_P0.05_DirectionalLogFC.csv\n"
+)
+
+cat(
+  "  5. Unique_DEP_Protein_List_P0.05_DirectionalLogFC.csv\n"
+)
+
+cat(
+  "  6. DEP_Mean_Protein_Expression_By_Condition.csv\n"
+)
+
+cat(
+  "  7. DEP_Protein_Expression_RowScaled_Heatmap_Matrix.csv\n"
+)
+
+cat(
+  "  8. DEP_Protein_Expression_Heatmap_Final_Protein_List.csv\n"
+)
+
+cat(
+  "  9. DEP_Significant_Log2FC_Heatmap.pdf\n"
+)
+
+cat(
+  " 10. DEP_Significant_Log2FC_Heatmap.svg\n"
+)
+
+cat(
+  " 11. DEP_Significant_Log2FC_Heatmap.png\n"
+)
+
+cat(
+  " 12. DEP_Significant_Log2FC_Heatmap.jpg\n"
+)
+
+cat("\n============================================================\n")̥
+
+# -------------------------------------------------------------------------
