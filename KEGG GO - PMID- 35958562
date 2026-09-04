@@ -1,0 +1,795 @@
+# ============================================================
+# FUNCTIONAL ENRICHMENT + KEGG PATHWAY ANALYSIS
+# GO: BP, CC, MF
+# KEGG PATHWAY ENRICHMENT
+#
+# Input:
+# All_DEPs_All_Comparisons_P0.05_DirectionalLogFC.csv
+#
+# Protein identifier column:
+# Protein
+#
+# Significance:
+# BH-adjusted p-value < 0.05
+# ============================================================
+
+
+# ============================================================
+# 1. INSTALL REQUIRED PACKAGES
+# ============================================================
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+# clusterProfiler
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+  BiocManager::install("clusterProfiler")
+}
+
+# Human annotation database
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Hs.eg.db")
+}
+
+# Excel
+if (!requireNamespace("openxlsx", quietly = TRUE)) {
+  install.packages("openxlsx")
+}
+
+
+# ============================================================
+# 2. LOAD PACKAGES
+# ============================================================
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(openxlsx)
+
+
+# ============================================================
+# 3. INPUT FILE
+# ============================================================
+
+input_file <- paste0(
+  "D:/Ph.D/First_Objective/",
+  "Devika_Reanalysis/Covid_19_data/35958562/",
+  "DEP_Analysis_P0.05_DirectionalLogFC0.5/",
+  "All_DEPs_All_Comparisons_P0.05_DirectionalLogFC.csv"
+)
+
+
+# ============================================================
+# 4. OUTPUT FILE
+# ============================================================
+
+output_file <- paste0(
+  "D:/Ph.D/First_Objective/",
+  "Devika_Reanalysis/Covid_19_data/35958562/",
+  "DEP_Analysis_P0.05_DirectionalLogFC0.5/",
+  "All_DEPs_GO_KEGG_Enrichment_Final.xlsx"
+)
+
+
+# ============================================================
+# 5. CHECK INPUT FILE
+# ============================================================
+
+if (!file.exists(input_file)) {
+  stop(
+    "Input file not found:\n",
+    input_file
+  )
+}
+
+
+# ============================================================
+# 6. READ INPUT DATA
+# ============================================================
+
+data <- read.csv(
+  input_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+cat("\n========================================\n")
+cat("INPUT DATA\n")
+cat("========================================\n")
+
+cat("Number of rows:", nrow(data), "\n")
+cat("Number of columns:", ncol(data), "\n\n")
+
+cat("Column names:\n")
+print(colnames(data))
+
+
+# ============================================================
+# 7. CHECK PROTEIN COLUMN
+# ============================================================
+
+if (!"Protein" %in% colnames(data)) {
+  stop(
+    "\nERROR: 'Protein' column was not found.\n\n",
+    "Available columns are:\n",
+    paste(colnames(data), collapse = ", ")
+  )
+}
+
+
+# ============================================================
+# 8. EXTRACT PROTEIN IDENTIFIERS
+# ============================================================
+
+proteins <- data$Protein
+
+# Convert to character
+proteins <- as.character(proteins)
+
+# Remove NA
+proteins <- proteins[
+  !is.na(proteins)
+]
+
+# Remove empty values
+proteins <- proteins[
+  proteins != ""
+]
+
+# Remove leading/trailing spaces
+proteins <- trimws(proteins)
+
+# Remove duplicates
+proteins <- unique(proteins)
+
+
+cat("\n========================================\n")
+cat("PROTEIN IDENTIFIERS\n")
+cat("========================================\n")
+
+cat(
+  "Total unique Protein identifiers:",
+  length(proteins),
+  "\n"
+)
+
+cat("\nFirst 20 Protein identifiers:\n")
+print(head(proteins, 20))
+
+
+# ============================================================
+# 9. DETERMINE PROTEIN IDENTIFIER TYPE
+# ============================================================
+
+# Check whether identifiers look like UniProt IDs
+# Examples:
+# P0DTC2
+# P0DTC3
+# P0DTC9
+# Q9Y6K9
+
+uniprot_pattern <- grepl(
+  "^[A-Z][0-9][A-Z0-9]{3}[0-9]$",
+  proteins
+)
+
+# Check whether identifiers look like gene symbols
+symbol_pattern <- grepl(
+  "^[A-Za-z0-9-]+$",
+  proteins
+)
+
+uniprot_count <- sum(uniprot_pattern)
+
+cat("\n========================================\n")
+cat("IDENTIFIER CHECK\n")
+cat("========================================\n")
+
+cat(
+  "Identifiers matching UniProt-like format:",
+  uniprot_count,
+  "\n"
+)
+
+cat(
+  "Total identifiers:",
+  length(proteins),
+  "\n"
+)
+
+
+# ============================================================
+# 10. PROTEIN -> ENTREZ ID CONVERSION
+# ============================================================
+
+cat("\n========================================\n")
+cat("GENE ID CONVERSION\n")
+cat("========================================\n")
+
+
+# ------------------------------------------------------------
+# If Protein column contains UniProt IDs
+# ------------------------------------------------------------
+
+if (uniprot_count > (length(proteins) / 2)) {
+  
+  cat("Detected identifier type: UniProt\n\n")
+  
+  gene_conversion <- bitr(
+    proteins,
+    fromType = "UNIPROT",
+    toType = c("SYMBOL", "ENTREZID"),
+    OrgDb = org.Hs.eg.db
+  )
+  
+  # Add original Protein column
+  gene_conversion$Protein <- gene_conversion$UNIPROT
+  
+  # Reorder columns
+  gene_conversion <- gene_conversion[
+    ,
+    c(
+      "Protein",
+      "UNIPROT",
+      "SYMBOL",
+      "ENTREZID"
+    )
+  ]
+  
+} else {
+  
+  # ----------------------------------------------------------
+  # If Protein column contains gene symbols
+  # ----------------------------------------------------------
+  
+  cat("Detected identifier type: Gene SYMBOL\n\n")
+  
+  gene_conversion <- bitr(
+    proteins,
+    fromType = "SYMBOL",
+    toType = "ENTREZID",
+    OrgDb = org.Hs.eg.db
+  )
+  
+  # Add original Protein column
+  gene_conversion$Protein <- gene_conversion$SYMBOL
+  
+  # Reorder
+  gene_conversion <- gene_conversion[
+    ,
+    c(
+      "Protein",
+      "SYMBOL",
+      "ENTREZID"
+    )
+  ]
+}
+
+
+# ============================================================
+# 11. REMOVE DUPLICATE ENTREZ IDS
+# ============================================================
+
+gene_conversion <- gene_conversion[
+  !duplicated(gene_conversion$ENTREZID),
+  ,
+  drop = FALSE
+]
+
+
+# ============================================================
+# 12. ENTREZ GENE LIST
+# ============================================================
+
+entrez_genes <- unique(
+  gene_conversion$ENTREZID
+)
+
+entrez_genes <- entrez_genes[
+  !is.na(entrez_genes)
+]
+
+
+cat(
+  "Successfully mapped proteins:",
+  length(entrez_genes),
+  "\n"
+)
+
+cat(
+  "Unmapped proteins:",
+  length(setdiff(proteins, gene_conversion$Protein)),
+  "\n"
+)
+
+
+# ============================================================
+# 13. GO ENRICHMENT
+# ============================================================
+
+cat("\n========================================\n")
+cat("GO ENRICHMENT\n")
+cat("========================================\n")
+
+
+# ------------------------------------------------------------
+# Biological Process
+# ------------------------------------------------------------
+
+GO_BP <- enrichGO(
+  gene = entrez_genes,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  readable = TRUE
+)
+
+
+# ------------------------------------------------------------
+# Cellular Component
+# ------------------------------------------------------------
+
+GO_CC <- enrichGO(
+  gene = entrez_genes,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  readable = TRUE
+)
+
+
+# ------------------------------------------------------------
+# Molecular Function
+# ------------------------------------------------------------
+
+GO_MF <- enrichGO(
+  gene = entrez_genes,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  readable = TRUE
+)
+
+
+# ============================================================
+# 14. KEGG PATHWAY ENRICHMENT
+# ============================================================
+
+cat("\n========================================\n")
+cat("KEGG PATHWAY ENRICHMENT\n")
+cat("========================================\n")
+
+
+KEGG <- enrichKEGG(
+  gene = entrez_genes,
+  organism = "hsa",
+  keyType = "ncbi-geneid",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1
+)
+
+
+# ============================================================
+# 15. CONVERT RESULTS TO DATA FRAMES
+# ============================================================
+
+BP_df <- as.data.frame(GO_BP)
+
+CC_df <- as.data.frame(GO_CC)
+
+MF_df <- as.data.frame(GO_MF)
+
+KEGG_df <- as.data.frame(KEGG)
+
+# Convert KEGG geneID from Entrez IDs to gene SYMBOLs
+if (nrow(KEGG_df) > 0) {
+
+  kegg_entrez <- unique(
+    unlist(strsplit(KEGG_df$geneID, "/"))
+  )
+
+  kegg_conversion <- bitr(
+    kegg_entrez,
+    fromType = "ENTREZID",
+    toType = "SYMBOL",
+    OrgDb = org.Hs.eg.db
+  )
+
+  entrez_to_symbol <- setNames(
+    kegg_conversion$SYMBOL,
+    kegg_conversion$ENTREZID
+  )
+
+  # Keep the original KEGG Entrez geneID column
+  KEGG_df$geneID_Entrez <- KEGG_df$geneID
+
+  # Add a separate gene-symbol column
+  KEGG_df$geneID_SYMBOL <- vapply(
+    KEGG_df$geneID,
+    function(x) {
+      ids <- unlist(strsplit(x, "/"))
+      symbols <- unname(entrez_to_symbol[ids])
+      symbols <- symbols[!is.na(symbols)]
+      paste(symbols, collapse = "/")
+    },
+    character(1)
+  )
+}
+
+
+# ============================================================
+# 16. KEEP SIGNIFICANT RESULTS
+# ============================================================
+
+BP_sig <- BP_df[
+  !is.na(BP_df$p.adjust) &
+    BP_df$p.adjust < 0.05,
+  ,
+  drop = FALSE
+]
+
+
+CC_sig <- CC_df[
+  !is.na(CC_df$p.adjust) &
+    CC_df$p.adjust < 0.05,
+  ,
+  drop = FALSE
+]
+
+
+MF_sig <- MF_df[
+  !is.na(MF_df$p.adjust) &
+    MF_df$p.adjust < 0.05,
+  ,
+  drop = FALSE
+]
+
+
+KEGG_sig <- KEGG_df[
+  !is.na(KEGG_df$p.adjust) &
+    KEGG_df$p.adjust < 0.05,
+  ,
+  drop = FALSE
+]
+
+
+# ============================================================
+# 17. PRINT ENRICHMENT SUMMARY
+# ============================================================
+
+cat("\n========================================\n")
+cat("ENRICHMENT SUMMARY\n")
+cat("========================================\n")
+
+cat(
+  "GO Biological Process pathways:",
+  nrow(BP_df),
+  "\n"
+)
+
+cat(
+  "Significant GO BP pathways:",
+  nrow(BP_sig),
+  "\n\n"
+)
+
+cat(
+  "GO Cellular Component pathways:",
+  nrow(CC_df),
+  "\n"
+)
+
+cat(
+  "Significant GO CC pathways:",
+  nrow(CC_sig),
+  "\n\n"
+)
+
+cat(
+  "GO Molecular Function pathways:",
+  nrow(MF_df),
+  "\n"
+)
+
+cat(
+  "Significant GO MF pathways:",
+  nrow(MF_sig),
+  "\n\n"
+)
+
+cat(
+  "KEGG pathways:",
+  nrow(KEGG_df),
+  "\n"
+)
+
+cat(
+  "Significant KEGG pathways:",
+  nrow(KEGG_sig),
+  "\n"
+)
+
+
+# ============================================================
+# 18. CREATE EXCEL WORKBOOK
+# ============================================================
+
+wb <- createWorkbook()
+
+
+# ============================================================
+# 19. ALL GO BP RESULTS
+# ============================================================
+
+addWorksheet(
+  wb,
+  "BP All"
+)
+
+writeData(
+  wb,
+  "BP All",
+  BP_df
+)
+
+
+# ============================================================
+# 20. SIGNIFICANT GO BP
+# ============================================================
+
+addWorksheet(
+  wb,
+  "BP Significant"
+)
+
+writeData(
+  wb,
+  "BP Significant",
+  BP_sig
+)
+
+
+# ============================================================
+# 21. ALL GO CC RESULTS
+# ============================================================
+
+addWorksheet(
+  wb,
+  "CC All"
+)
+
+writeData(
+  wb,
+  "CC All",
+  CC_df
+)
+
+
+# ============================================================
+# 22. SIGNIFICANT GO CC
+# ============================================================
+
+addWorksheet(
+  wb,
+  "CC Significant"
+)
+
+writeData(
+  wb,
+  "CC Significant",
+  CC_sig
+)
+
+
+# ============================================================
+# 23. ALL GO MF RESULTS
+# ============================================================
+
+addWorksheet(
+  wb,
+  "MF All"
+)
+
+writeData(
+  wb,
+  "MF All",
+  MF_df
+)
+
+
+# ============================================================
+# 24. SIGNIFICANT GO MF
+# ============================================================
+
+addWorksheet(
+  wb,
+  "MF Significant"
+)
+
+writeData(
+  wb,
+  "MF Significant",
+  MF_sig
+)
+
+
+# ============================================================
+# 25. ALL KEGG RESULTS
+# ============================================================
+
+addWorksheet(
+  wb,
+  "KEGG All"
+)
+
+writeData(
+  wb,
+  "KEGG All",
+  KEGG_df
+)
+
+
+# ============================================================
+# 26. SIGNIFICANT KEGG
+# ============================================================
+
+addWorksheet(
+  wb,
+  "KEGG Significant"
+)
+
+writeData(
+  wb,
+  "KEGG Significant",
+  KEGG_sig
+)
+
+
+# ============================================================
+# 27. GENE CONVERSION
+# ============================================================
+
+addWorksheet(
+  wb,
+  "Gene Conversion"
+)
+
+writeData(
+  wb,
+  "Gene Conversion",
+  gene_conversion
+)
+
+
+# ============================================================
+# 28. INPUT PROTEINS
+# ============================================================
+
+input_proteins_df <- data.frame(
+  Protein = proteins,
+  stringsAsFactors = FALSE
+)
+
+addWorksheet(
+  wb,
+  "Input Proteins"
+)
+
+writeData(
+  wb,
+  "Input Proteins",
+  input_proteins_df
+)
+
+
+# ============================================================
+# 29. FORMAT EXCEL SHEETS
+# ============================================================
+
+for (sheet in names(wb)) {
+  
+  setColWidths(
+    wb,
+    sheet,
+    cols = 1:50,
+    widths = "auto"
+  )
+  
+}
+
+
+# ============================================================
+# 30. SAVE EXCEL WORKBOOK
+# ============================================================
+
+saveWorkbook(
+  wb,
+  output_file,
+  overwrite = TRUE
+)
+
+
+# ============================================================
+# 31. FINAL SUMMARY
+# ============================================================
+
+cat("\n\n")
+cat("========================================\n")
+cat("FUNCTIONAL ENRICHMENT ANALYSIS COMPLETED\n")
+cat("========================================\n")
+
+cat(
+  "Input proteins:",
+  length(proteins),
+  "\n"
+)
+
+cat(
+  "Mapped proteins:",
+  length(entrez_genes),
+  "\n"
+)
+
+cat(
+  "GO BP pathways:",
+  nrow(BP_df),
+  "\n"
+)
+
+cat(
+  "Significant GO BP:",
+  nrow(BP_sig),
+  "\n"
+)
+
+cat(
+  "GO CC pathways:",
+  nrow(CC_df),
+  "\n"
+)
+
+cat(
+  "Significant GO CC:",
+  nrow(CC_sig),
+  "\n"
+)
+
+cat(
+  "GO MF pathways:",
+  nrow(MF_df),
+  "\n"
+)
+
+cat(
+  "Significant GO MF:",
+  nrow(MF_sig),
+  "\n"
+)
+
+cat(
+  "KEGG pathways:",
+  nrow(KEGG_df),
+  "\n"
+)
+
+cat(
+  "Significant KEGG:",
+  nrow(KEGG_sig),
+  "\n"
+)
+
+cat("\nOutput file:\n")
+cat(output_file, "\n")
+
+cat("========================================\n")
+
