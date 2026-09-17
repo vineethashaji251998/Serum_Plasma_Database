@@ -1,0 +1,1439 @@
+# ============================================================
+# GO ENRICHMENT ANALYSIS BY VIRUS
+#
+# ANALYSIS:
+#   GO Biological Process (BP)
+#   GO Cellular Component (CC)
+#   GO Molecular Function (MF)
+#
+# NO KEGG ANALYSIS
+#
+# INPUT:
+#   Supplementary_Table_1.xlsx = SERUM
+#   Supplementary_Table_2.xlsx = PLASMA
+#
+# INPUT COLUMNS:
+#   SYMBOL
+#   Disease_(Virus)
+#
+# OUTPUT:
+#   Separate BP, CC and MF sheet for each virus
+#   Gene_Mapping sheet
+#
+# ============================================================
+
+
+# ============================================================
+# 1. INSTALL REQUIRED PACKAGES
+# ============================================================
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+  BiocManager::install(
+    "clusterProfiler",
+    ask = FALSE,
+    update = FALSE
+  )
+}
+
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install(
+    "org.Hs.eg.db",
+    ask = FALSE,
+    update = FALSE
+  )
+}
+
+if (!requireNamespace("openxlsx", quietly = TRUE)) {
+  install.packages("openxlsx")
+}
+
+
+# ============================================================
+# 2. LOAD PACKAGES
+# ============================================================
+
+suppressPackageStartupMessages({
+  
+  library(clusterProfiler)
+  library(org.Hs.eg.db)
+  library(openxlsx)
+  
+})
+
+
+# ============================================================
+# 3. INPUT FILES
+# ============================================================
+
+SERUM_FILE <- paste0(
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/",
+  "DB_paper_Submit/Supplementary_Table_1.xlsx"
+)
+
+PLASMA_FILE <- paste0(
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/",
+  "DB_paper_Submit/Supplementary_Table_2.xlsx"
+)
+
+
+# ============================================================
+# 4. SHEET NAMES
+# ============================================================
+
+SERUM_SHEET <- "Serum _UPDOWN"
+
+PLASMA_SHEET <- "PlasmaUPDOWN"
+
+
+# ============================================================
+# 5. OUTPUT FILES
+# ============================================================
+
+SERUM_OUTPUT <- file.path(
+  dirname(SERUM_FILE),
+  "Serum_GO_Enrichment_By_Virus.xlsx"
+)
+
+PLASMA_OUTPUT <- file.path(
+  dirname(PLASMA_FILE),
+  "Plasma_GO_Enrichment_By_Virus.xlsx"
+)
+
+
+# ============================================================
+# 6. CHECK INPUT FILES
+# ============================================================
+
+if (!file.exists(SERUM_FILE)) {
+  
+  stop(
+    paste(
+      "SERUM FILE NOT FOUND:",
+      SERUM_FILE
+    )
+  )
+  
+}
+
+if (!file.exists(PLASMA_FILE)) {
+  
+  stop(
+    paste(
+      "PLASMA FILE NOT FOUND:",
+      PLASMA_FILE
+    )
+  )
+  
+}
+
+
+# ============================================================
+# 7. SYMBOL -> ENTREZ ID
+# ============================================================
+
+convert_symbols <- function(symbols) {
+  
+  # ----------------------------------------------------------
+  # Clean symbols
+  # ----------------------------------------------------------
+  
+  symbols <- trimws(
+    as.character(symbols)
+  )
+  
+  symbols <- symbols[
+    !is.na(symbols)
+  ]
+  
+  symbols <- symbols[
+    symbols != ""
+  ]
+  
+  symbols <- unique(
+    symbols
+  )
+  
+  
+  if (length(symbols) == 0) {
+    
+    return(
+      data.frame(
+        SYMBOL = character(),
+        ENTREZID = character(),
+        stringsAsFactors = FALSE
+      )
+    )
+    
+  }
+  
+  
+  # ----------------------------------------------------------
+  # SYMBOL -> ENTREZID
+  # ----------------------------------------------------------
+  
+  mapping <- tryCatch(
+    
+    suppressWarnings(
+      suppressMessages(
+        
+        bitr(
+          symbols,
+          fromType = "SYMBOL",
+          toType = "ENTREZID",
+          OrgDb = org.Hs.eg.db
+        )
+        
+      )
+    ),
+    
+    error = function(e) {
+      
+      cat(
+        "\nMapping error:",
+        conditionMessage(e),
+        "\n"
+      )
+      
+      return(
+        data.frame()
+      )
+      
+    }
+    
+  )
+  
+  
+  if (
+    is.null(mapping) ||
+    nrow(mapping) == 0
+  ) {
+    
+    return(
+      data.frame(
+        SYMBOL = character(),
+        ENTREZID = character(),
+        stringsAsFactors = FALSE
+      )
+    )
+    
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Clean mapping
+  # ----------------------------------------------------------
+  
+  mapping$SYMBOL <- trimws(
+    as.character(
+      mapping$SYMBOL
+    )
+  )
+  
+  mapping$ENTREZID <- trimws(
+    as.character(
+      mapping$ENTREZID
+    )
+  )
+  
+  
+  mapping <- mapping[
+    !is.na(mapping$SYMBOL) &
+      mapping$SYMBOL != "" &
+      !is.na(mapping$ENTREZID) &
+      mapping$ENTREZID != "",
+    ,
+    drop = FALSE
+  ]
+  
+  
+  # ----------------------------------------------------------
+  # Remove duplicate Entrez IDs
+  # ----------------------------------------------------------
+  
+  mapping <- mapping[
+    !duplicated(mapping$ENTREZID),
+    ,
+    drop = FALSE
+  ]
+  
+  
+  return(mapping)
+  
+}
+
+
+# ============================================================
+# 8. GO ENRICHMENT
+# ============================================================
+
+run_GO <- function(
+    entrez_ids,
+    ontology
+) {
+  
+  if (
+    length(entrez_ids) == 0
+  ) {
+    
+    return(
+      data.frame()
+    )
+    
+  }
+  
+  
+  cat(
+    "Running GO ",
+    ontology,
+    " enrichment...\n",
+    sep = ""
+  )
+  
+  
+  result <- tryCatch(
+    
+    suppressMessages(
+      
+      enrichGO(
+        
+        gene = entrez_ids,
+        
+        OrgDb = org.Hs.eg.db,
+        
+        keyType = "ENTREZID",
+        
+        ont = ontology,
+        
+        pAdjustMethod = "BH",
+        
+        pvalueCutoff = 1,
+        
+        qvalueCutoff = 1,
+        
+        readable = TRUE
+        
+      )
+      
+    ),
+    
+    error = function(e) {
+      
+      cat(
+        "\nGO ",
+        ontology,
+        " error: ",
+        conditionMessage(e),
+        "\n",
+        sep = ""
+      )
+      
+      return(NULL)
+      
+    }
+    
+  )
+  
+  
+  if (
+    is.null(result)
+  ) {
+    
+    return(
+      data.frame()
+    )
+    
+  }
+  
+  
+  result <- as.data.frame(
+    result
+  )
+  
+  
+  if (
+    nrow(result) == 0
+  ) {
+    
+    return(
+      data.frame()
+    )
+    
+  }
+  
+  
+  return(result)
+  
+}
+
+
+# ============================================================
+# 9. ADD VIRUS COLUMN
+# ============================================================
+
+add_virus <- function(
+    result,
+    virus
+) {
+  
+  if (
+    is.null(result) ||
+    nrow(result) == 0
+  ) {
+    
+    return(result)
+    
+  }
+  
+  
+  result$Virus <- virus
+  
+  
+  result <- result[
+    c(
+      "Virus",
+      setdiff(
+        names(result),
+        "Virus"
+      )
+    )
+  ]
+  
+  
+  return(result)
+  
+}
+
+
+# ============================================================
+# 10. SAFE EXCEL SHEET NAME
+# ============================================================
+
+safe_sheet <- function(
+    virus,
+    analysis
+) {
+  
+  x <- paste0(
+    virus,
+    "_",
+    analysis
+  )
+  
+  
+  # Remove invalid Excel characters
+  
+  x <- gsub(
+    "[\\[\\]:*?/\\\\]",
+    "_",
+    x
+  )
+  
+  
+  x <- gsub(
+    "[[:space:]]+",
+    "_",
+    x
+  )
+  
+  
+  x <- gsub(
+    "[^A-Za-z0-9_.-]",
+    "_",
+    x
+  )
+  
+  
+  # Maximum Excel sheet name = 31 characters
+  
+  x <- substr(
+    x,
+    1,
+    31
+  )
+  
+  
+  if (
+    x == "" ||
+    is.na(x)
+  ) {
+    
+    x <- paste0(
+      "Virus_",
+      analysis
+    )
+    
+  }
+  
+  
+  return(x)
+  
+}
+
+
+# ============================================================
+# 11. MAKE UNIQUE SHEET NAME
+# ============================================================
+
+unique_sheet <- function(
+    virus,
+    analysis,
+    used_names
+) {
+  
+  base <- safe_sheet(
+    virus,
+    analysis
+  )
+  
+  
+  candidate <- base
+  
+  number <- 2
+  
+  
+  while (
+    candidate %in% used_names
+  ) {
+    
+    suffix <- paste0(
+      "_",
+      number
+    )
+    
+    
+    candidate <- paste0(
+      substr(
+        base,
+        1,
+        31 - nchar(suffix)
+      ),
+      suffix
+    )
+    
+    
+    number <- number + 1
+    
+  }
+  
+  
+  return(candidate)
+  
+}
+
+
+# ============================================================
+# 12. PROCESS ONE VIRUS
+# ============================================================
+
+process_virus <- function(
+    virus_data,
+    virus_name
+) {
+  
+  cat("\n")
+  cat("====================================================\n")
+  
+  cat(
+    "VIRUS: ",
+    virus_name,
+    "\n",
+    sep = ""
+  )
+  
+  cat("====================================================\n")
+  
+  
+  # ----------------------------------------------------------
+  # Extract genes from actual input data
+  # ----------------------------------------------------------
+  
+  genes <- unique(
+    trimws(
+      as.character(
+        virus_data$SYMBOL
+      )
+    )
+  )
+  
+  
+  genes <- genes[
+    !is.na(genes) &
+      genes != ""
+  ]
+  
+  
+  cat(
+    "Input genes: ",
+    length(genes),
+    "\n",
+    sep = ""
+  )
+  
+  
+  # ----------------------------------------------------------
+  # SYMBOL -> ENTREZ
+  # ----------------------------------------------------------
+  
+  mapping <- convert_symbols(
+    genes
+  )
+  
+  
+  if (
+    nrow(mapping) == 0
+  ) {
+    
+    cat(
+      "No genes mapped to Entrez IDs.\n"
+    )
+    
+    
+    empty <- data.frame(
+      
+      Virus = virus_name,
+      
+      Message =
+        "No genes could be mapped to Entrez IDs",
+      
+      stringsAsFactors = FALSE
+      
+    )
+    
+    
+    return(
+      list(
+        
+        BP = empty,
+        
+        CC = empty,
+        
+        MF = empty,
+        
+        Mapping = mapping,
+        
+        InputGenes =
+          length(genes),
+        
+        MappedGenes = 0,
+        
+        EntrezIDs = 0
+        
+      )
+    )
+    
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Get Entrez IDs
+  # ----------------------------------------------------------
+  
+  entrez_ids <- unique(
+    as.character(
+      mapping$ENTREZID
+    )
+  )
+  
+  
+  cat(
+    "Mapped genes: ",
+    length(unique(mapping$SYMBOL)),
+    "\n",
+    sep = ""
+  )
+  
+  
+  cat(
+    "Entrez IDs: ",
+    length(entrez_ids),
+    "\n",
+    sep = ""
+  )
+  
+  
+  # ==========================================================
+  # GO BIOLOGICAL PROCESS
+  # ==========================================================
+  
+  BP <- run_GO(
+    entrez_ids,
+    "BP"
+  )
+  
+  
+  BP <- add_virus(
+    BP,
+    virus_name
+  )
+  
+  
+  # ==========================================================
+  # GO CELLULAR COMPONENT
+  # ==========================================================
+  
+  CC <- run_GO(
+    entrez_ids,
+    "CC"
+  )
+  
+  
+  CC <- add_virus(
+    CC,
+    virus_name
+  )
+  
+  
+  # ==========================================================
+  # GO MOLECULAR FUNCTION
+  # ==========================================================
+  
+  MF <- run_GO(
+    entrez_ids,
+    "MF"
+  )
+  
+  
+  MF <- add_virus(
+    MF,
+    virus_name
+  )
+  
+  
+  # ==========================================================
+  # PRINT RESULTS
+  # ==========================================================
+  
+  cat(
+    "GO-BP pathways: ",
+    nrow(BP),
+    "\n",
+    sep = ""
+  )
+  
+  
+  cat(
+    "GO-CC pathways: ",
+    nrow(CC),
+    "\n",
+    sep = ""
+  )
+  
+  
+  cat(
+    "GO-MF pathways: ",
+    nrow(MF),
+    "\n",
+    sep = ""
+  )
+  
+  
+  # ==========================================================
+  # RETURN
+  # ==========================================================
+  
+  return(
+    list(
+      
+      BP = BP,
+      
+      CC = CC,
+      
+      MF = MF,
+      
+      Mapping = mapping,
+      
+      InputGenes =
+        length(genes),
+      
+      MappedGenes =
+        length(unique(mapping$SYMBOL)),
+      
+      EntrezIDs =
+        length(entrez_ids)
+      
+    )
+  )
+  
+}
+
+
+# ============================================================
+# 13. WRITE RESULT
+# ============================================================
+
+write_result <- function(
+    wb,
+    sheet_name,
+    result,
+    empty_message
+) {
+  
+  addWorksheet(
+    wb,
+    sheet_name
+  )
+  
+  
+  if (
+    !is.null(result) &&
+    nrow(result) > 0
+  ) {
+    
+    writeData(
+      wb,
+      sheet_name,
+      result,
+      rowNames = FALSE
+    )
+    
+  } else {
+    
+    writeData(
+      wb,
+      sheet_name,
+      
+      data.frame(
+        Message = empty_message,
+        stringsAsFactors = FALSE
+      ),
+      
+      rowNames = FALSE
+      
+    )
+    
+  }
+  
+}
+
+
+# ============================================================
+# 14. PROCESS DATASET
+# ============================================================
+
+process_dataset <- function(
+    input_file,
+    sheet_name,
+    output_file,
+    dataset_name
+) {
+  
+  cat("\n\n")
+  cat("####################################################\n")
+  
+  cat(
+    "DATASET: ",
+    dataset_name,
+    "\n",
+    sep = ""
+  )
+  
+  cat("####################################################\n")
+  
+  
+  cat(
+    "Input:\n",
+    input_file,
+    "\n"
+  )
+  
+  
+  cat(
+    "Output:\n",
+    output_file,
+    "\n"
+  )
+  
+  
+  # ==========================================================
+  # READ EXCEL
+  # ==========================================================
+  
+  data <- read.xlsx(
+    input_file,
+    sheet = sheet_name
+  )
+  
+  
+  # ==========================================================
+  # CLEAN COLUMN NAMES
+  # ==========================================================
+  
+  names(data) <- trimws(
+    names(data)
+  )
+  
+  
+  cat("\nColumns found:\n")
+  
+  print(
+    names(data)
+  )
+  
+  
+  # ==========================================================
+  # CHECK REQUIRED COLUMNS
+  # ==========================================================
+  
+  required_columns <- c(
+    "SYMBOL",
+    "Disease_(Virus)"
+  )
+  
+  
+  missing_columns <- setdiff(
+    required_columns,
+    names(data)
+  )
+  
+  
+  if (
+    length(missing_columns) > 0
+  ) {
+    
+    stop(
+      paste(
+        "Missing required columns:",
+        paste(
+          missing_columns,
+          collapse = ", "
+        )
+      )
+    )
+    
+  }
+  
+  
+  # ==========================================================
+  # CLEAN DATA
+  # ==========================================================
+  
+  data$SYMBOL <- trimws(
+    as.character(
+      data$SYMBOL
+    )
+  )
+  
+  
+  data$Virus <- trimws(
+    as.character(
+      data[["Disease_(Virus)"]]
+    )
+  )
+  
+  
+  data <- data[
+    !is.na(data$SYMBOL) &
+      data$SYMBOL != "" &
+      !is.na(data$Virus) &
+      data$Virus != "",
+    ,
+    drop = FALSE
+  ]
+  
+  
+  # ==========================================================
+  # GET VIRUSES
+  # ==========================================================
+  
+  viruses <- unique(
+    data$Virus
+  )
+  
+  
+  viruses <- viruses[
+    !is.na(viruses) &
+      viruses != ""
+  ]
+  
+  
+  cat("\n")
+  cat(
+    "Viruses detected: ",
+    length(viruses),
+    "\n",
+    sep = ""
+  )
+  
+  
+  print(
+    viruses
+  )
+  
+  
+  # ==========================================================
+  # CREATE WORKBOOK
+  # ==========================================================
+  
+  wb <- createWorkbook()
+  
+  
+  # ==========================================================
+  # USED SHEET NAMES
+  # ==========================================================
+  
+  used_names <- character()
+  
+  
+  # ==========================================================
+  # STORE ALL GENE MAPPINGS
+  # ==========================================================
+  
+  all_mapping <- data.frame(
+    
+    Dataset = character(),
+    
+    Virus = character(),
+    
+    SYMBOL = character(),
+    
+    ENTREZID = character(),
+    
+    stringsAsFactors = FALSE
+    
+  )
+  
+  
+  # ==========================================================
+  # PROCESS EACH VIRUS
+  # ==========================================================
+  
+  for (
+    virus in viruses
+  ) {
+    
+    
+    virus_data <- data[
+      data$Virus == virus,
+      ,
+      drop = FALSE
+    ]
+    
+    
+    results <- process_virus(
+      virus_data,
+      virus
+    )
+    
+    
+    # ========================================================
+    # CREATE BP SHEET
+    # ========================================================
+    
+    BP_sheet <- unique_sheet(
+      virus,
+      "BP",
+      used_names
+    )
+    
+    
+    used_names <- c(
+      used_names,
+      BP_sheet
+    )
+    
+    
+    # ========================================================
+    # CREATE CC SHEET
+    # ========================================================
+    
+    CC_sheet <- unique_sheet(
+      virus,
+      "CC",
+      used_names
+    )
+    
+    
+    used_names <- c(
+      used_names,
+      CC_sheet
+    )
+    
+    
+    # ========================================================
+    # CREATE MF SHEET
+    # ========================================================
+    
+    MF_sheet <- unique_sheet(
+      virus,
+      "MF",
+      used_names
+    )
+    
+    
+    used_names <- c(
+      used_names,
+      MF_sheet
+    )
+    
+    
+    # ========================================================
+    # WRITE BP
+    # ========================================================
+    
+    write_result(
+      wb,
+      BP_sheet,
+      results$BP,
+      "No GO Biological Process pathways returned"
+    )
+    
+    
+    # ========================================================
+    # WRITE CC
+    # ========================================================
+    
+    write_result(
+      wb,
+      CC_sheet,
+      results$CC,
+      "No GO Cellular Component pathways returned"
+    )
+    
+    
+    # ========================================================
+    # WRITE MF
+    # ========================================================
+    
+    write_result(
+      wb,
+      MF_sheet,
+      results$MF,
+      "No GO Molecular Function pathways returned"
+    )
+    
+    
+    # ========================================================
+    # GENE MAPPING
+    # ========================================================
+    
+    if (
+      nrow(results$Mapping) > 0
+    ) {
+      
+      mapping <- results$Mapping
+      
+      
+      mapping$Dataset <-
+        dataset_name
+      
+      mapping$Virus <-
+        virus
+      
+      
+      mapping <- mapping[
+        c(
+          "Dataset",
+          "Virus",
+          "SYMBOL",
+          "ENTREZID"
+        )
+      ]
+      
+      
+      all_mapping <- rbind(
+        all_mapping,
+        mapping
+      )
+      
+    }
+    
+  }
+  
+  
+  # ==========================================================
+  # GENE MAPPING SHEET
+  # ==========================================================
+  
+  addWorksheet(
+    wb,
+    "Gene_Mapping"
+  )
+  
+  
+  if (
+    nrow(all_mapping) > 0
+  ) {
+    
+    writeData(
+      wb,
+      "Gene_Mapping",
+      all_mapping,
+      rowNames = FALSE
+    )
+    
+  } else {
+    
+    writeData(
+      wb,
+      "Gene_Mapping",
+      
+      data.frame(
+        Message =
+          "No genes could be mapped"
+      ),
+      
+      rowNames = FALSE
+    )
+    
+  }
+  
+  
+  # ==========================================================
+  # HEADER STYLE
+  # ==========================================================
+  
+  header_style <- createStyle(
+    textDecoration = "bold",
+    halign = "center"
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Apply header style to every GO sheet
+  # ----------------------------------------------------------
+  
+  for (
+    sheet_name in used_names
+  ) {
+    
+    sheet_data <- readWorkbook(
+      wb,
+      sheet = sheet_name
+    )
+    
+    
+    if (
+      ncol(sheet_data) > 0
+    ) {
+      
+      addStyle(
+        wb,
+        sheet_name,
+        header_style,
+        rows = 1,
+        cols = 1:ncol(sheet_data),
+        gridExpand = TRUE
+      )
+      
+    }
+    
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Gene mapping header
+  # ----------------------------------------------------------
+  
+  if (
+    nrow(all_mapping) > 0
+  ) {
+    
+    addStyle(
+      wb,
+      "Gene_Mapping",
+      header_style,
+      rows = 1,
+      cols = 1:ncol(all_mapping),
+      gridExpand = TRUE
+    )
+    
+  }
+  
+  
+  # ==========================================================
+  # FREEZE HEADERS
+  # ==========================================================
+  
+  for (
+    sheet_name in used_names
+  ) {
+    
+    freezePane(
+      wb,
+      sheet_name,
+      firstRow = TRUE
+    )
+    
+  }
+  
+  
+  freezePane(
+    wb,
+    "Gene_Mapping",
+    firstRow = TRUE
+  )
+  
+  
+  # ==========================================================
+  # AUTO COLUMN WIDTH
+  # ==========================================================
+  
+  for (
+    sheet_name in used_names
+  ) {
+    
+    sheet_data <- readWorkbook(
+      wb,
+      sheet = sheet_name
+    )
+    
+    
+    if (
+      ncol(sheet_data) > 0
+    ) {
+      
+      setColWidths(
+        wb,
+        sheet_name,
+        cols = 1:ncol(sheet_data),
+        widths = "auto"
+      )
+      
+    }
+    
+  }
+  
+  
+  if (
+    nrow(all_mapping) > 0
+  ) {
+    
+    setColWidths(
+      wb,
+      "Gene_Mapping",
+      cols = 1:ncol(all_mapping),
+      widths = "auto"
+    )
+    
+  }
+  
+  
+  # ==========================================================
+  # SAVE WORKBOOK
+  # ==========================================================
+  
+  cat("\n")
+  cat(
+    "Saving workbook...\n"
+  )
+  
+  
+  saveWorkbook(
+    wb,
+    output_file,
+    overwrite = TRUE
+  )
+  
+  
+  # ==========================================================
+  # COMPLETED
+  # ==========================================================
+  
+  cat("\n")
+  cat("####################################################\n")
+  
+  cat(
+    dataset_name,
+    " GO ANALYSIS COMPLETED\n"
+  )
+  
+  cat("####################################################\n")
+  
+  
+  cat(
+    "Output file:\n",
+    output_file,
+    "\n"
+  )
+  
+  
+  cat(
+    "Number of viruses: ",
+    length(viruses),
+    "\n",
+    sep = ""
+  )
+  
+  
+  cat("Analyses: BP, CC, MF only\n")
+  
+  cat("####################################################\n")
+  
+}
+
+
+# ============================================================
+# 15. RUN SERUM
+# ============================================================
+
+process_dataset(
+  
+  input_file =
+    SERUM_FILE,
+  
+  sheet_name =
+    SERUM_SHEET,
+  
+  output_file =
+    SERUM_OUTPUT,
+  
+  dataset_name =
+    "SERUM"
+  
+)
+
+
+# ============================================================
+# 16. RUN PLASMA
+# ============================================================
+
+process_dataset(
+  
+  input_file =
+    PLASMA_FILE,
+  
+  sheet_name =
+    PLASMA_SHEET,
+  
+  output_file =
+    PLASMA_OUTPUT,
+  
+  dataset_name =
+    "PLASMA"
+  
+)
+
+
+# ============================================================
+# 17. FINAL MESSAGE
+# ============================================================
+
+cat("\n")
+cat("====================================================\n")
+cat("GO ANALYSIS COMPLETED SUCCESSFULLY\n")
+cat("====================================================\n")
+
+cat("\nSERUM OUTPUT:\n")
+cat(
+  SERUM_OUTPUT,
+  "\n"
+)
+
+cat("\nPLASMA OUTPUT:\n")
+cat(
+  PLASMA_OUTPUT,
+  "\n"
+)
+
+cat("\nAnalyses performed:\n")
+cat("  GO Biological Process (BP)\n")
+cat("  GO Cellular Component (CC)\n")
+cat("  GO Molecular Function (MF)\n")
+
+cat("\nNo KEGG analysis was performed.\n")
+
+cat("====================================================\n")
