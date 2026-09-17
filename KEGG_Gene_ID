@@ -1,0 +1,1287 @@
+# ============================================================
+# KEGG ENRICHMENT ANALYSIS BY VIRUS
+#
+# INPUT:
+#   Supplementary_Table_1.xlsx = SERUM
+#   Supplementary_Table_2.xlsx = PLASMA
+#
+# INPUT COLUMNS:
+#   SYMBOL
+#   Disease_(Virus)
+#
+# ANALYSIS:
+#   KEGG ONLY
+#
+# OUTPUT:
+#   One KEGG_DATA sheet containing ALL VIRUSES
+#
+# KEGG:
+#   Enrichment is performed using Entrez IDs
+#   KEGG geneID is converted to GENE SYMBOLS
+#
+# ============================================================
+
+
+# ============================================================
+# 1. INSTALL REQUIRED PACKAGES
+# ============================================================
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+  BiocManager::install(
+    "clusterProfiler",
+    ask = FALSE,
+    update = FALSE
+  )
+}
+
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install(
+    "org.Hs.eg.db",
+    ask = FALSE,
+    update = FALSE
+  )
+}
+
+if (!requireNamespace("openxlsx", quietly = TRUE)) {
+  install.packages("openxlsx")
+}
+
+
+# ============================================================
+# 2. LOAD PACKAGES
+# ============================================================
+
+suppressPackageStartupMessages({
+
+  library(clusterProfiler)
+  library(org.Hs.eg.db)
+  library(openxlsx)
+
+})
+
+
+# ============================================================
+# 3. INPUT FILES
+# ============================================================
+
+SERUM_FILE <- paste0(
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/",
+  "DB_paper_Submit/Supplementary_Table_1.xlsx"
+)
+
+PLASMA_FILE <- paste0(
+  "D:/Ph.D/First_Objective/Devika_Reanalysis/",
+  "DB_paper_Submit/Supplementary_Table_2.xlsx"
+)
+
+
+# ============================================================
+# 4. SHEET NAMES
+# ============================================================
+
+SERUM_SHEET <- "Serum _UPDOWN"
+
+PLASMA_SHEET <- "PlasmaUPDOWN"
+
+
+# ============================================================
+# 5. OUTPUT FILES
+# ============================================================
+
+SERUM_OUTPUT <- file.path(
+  dirname(SERUM_FILE),
+  "Serum_KEGG_Enrichment_By_Virus.xlsx"
+)
+
+PLASMA_OUTPUT <- file.path(
+  dirname(PLASMA_FILE),
+  "Plasma_KEGG_Enrichment_By_Virus.xlsx"
+)
+
+
+# ============================================================
+# 6. CHECK INPUT FILES
+# ============================================================
+
+if (!file.exists(SERUM_FILE)) {
+
+  stop(
+    paste(
+      "SERUM FILE NOT FOUND:",
+      SERUM_FILE
+    )
+  )
+
+}
+
+
+if (!file.exists(PLASMA_FILE)) {
+
+  stop(
+    paste(
+      "PLASMA FILE NOT FOUND:",
+      PLASMA_FILE
+    )
+  )
+
+}
+
+
+# ============================================================
+# 7. SYMBOL -> ENTREZ ID
+# ============================================================
+
+convert_symbols <- function(symbols) {
+
+  # Clean
+  symbols <- trimws(
+    as.character(symbols)
+  )
+
+  # Remove NA
+  symbols <- symbols[
+    !is.na(symbols)
+  ]
+
+  # Remove empty values
+  symbols <- symbols[
+    symbols != ""
+  ]
+
+  # Unique
+  symbols <- unique(
+    symbols
+  )
+
+
+  if (length(symbols) == 0) {
+
+    return(
+      data.frame(
+        SYMBOL = character(),
+        ENTREZID = character(),
+        stringsAsFactors = FALSE
+      )
+    )
+
+  }
+
+
+  # ----------------------------------------------------------
+  # Convert SYMBOL -> ENTREZID
+  # ----------------------------------------------------------
+
+  mapping <- tryCatch(
+
+    suppressWarnings(
+      suppressMessages(
+
+        bitr(
+          symbols,
+          fromType = "SYMBOL",
+          toType = "ENTREZID",
+          OrgDb = org.Hs.eg.db
+        )
+
+      )
+    ),
+
+    error = function(e) {
+
+      cat(
+        "\nMapping error:",
+        conditionMessage(e),
+        "\n"
+      )
+
+      return(
+        data.frame()
+      )
+
+    }
+
+  )
+
+
+  if (
+    is.null(mapping) ||
+    nrow(mapping) == 0
+  ) {
+
+    return(
+      data.frame(
+        SYMBOL = character(),
+        ENTREZID = character(),
+        stringsAsFactors = FALSE
+      )
+    )
+
+  }
+
+
+  # ----------------------------------------------------------
+  # Clean mapping
+  # ----------------------------------------------------------
+
+  mapping$SYMBOL <- trimws(
+    as.character(
+      mapping$SYMBOL
+    )
+  )
+
+  mapping$ENTREZID <- trimws(
+    as.character(
+      mapping$ENTREZID
+    )
+  )
+
+
+  mapping <- mapping[
+    !is.na(mapping$SYMBOL) &
+      mapping$SYMBOL != "" &
+      !is.na(mapping$ENTREZID) &
+      mapping$ENTREZID != "",
+    ,
+    drop = FALSE
+  ]
+
+
+  # ----------------------------------------------------------
+  # One SYMBOL per Entrez ID
+  # ----------------------------------------------------------
+
+  mapping <- mapping[
+    !duplicated(mapping$ENTREZID),
+    ,
+    drop = FALSE
+  ]
+
+
+  return(mapping)
+
+}
+
+
+# ============================================================
+# 8. KEGG ENRICHMENT
+# ============================================================
+
+run_KEGG <- function(
+    entrez_ids
+) {
+
+  if (
+    length(entrez_ids) == 0
+  ) {
+
+    return(
+      data.frame()
+    )
+
+  }
+
+
+  cat(
+    "Running KEGG enrichment...\n"
+  )
+
+
+  result <- tryCatch(
+
+    suppressMessages(
+
+      enrichKEGG(
+
+        gene = entrez_ids,
+
+        organism = "hsa",
+
+        keyType = "ncbi-geneid",
+
+        pAdjustMethod = "BH",
+
+        pvalueCutoff = 1,
+
+        qvalueCutoff = 1
+
+      )
+
+    ),
+
+    error = function(e) {
+
+      cat(
+        "\nKEGG error:",
+        conditionMessage(e),
+        "\n"
+      )
+
+      return(NULL)
+
+    }
+
+  )
+
+
+  if (
+    is.null(result)
+  ) {
+
+    return(
+      data.frame()
+    )
+
+  }
+
+
+  result <- as.data.frame(
+    result
+  )
+
+
+  if (
+    nrow(result) == 0
+  ) {
+
+    return(
+      data.frame()
+    )
+
+  }
+
+
+  return(result)
+
+}
+
+
+# ============================================================
+# 9. CONVERT KEGG geneID
+#
+# KEGG returns Entrez IDs in geneID.
+#
+# This converts the KEGG pathway-specific geneID
+# into the corresponding gene SYMBOLS.
+# ============================================================
+
+convert_kegg_geneID <- function(
+    kegg_result,
+    mapping
+) {
+
+  if (
+    is.null(kegg_result) ||
+    nrow(kegg_result) == 0
+  ) {
+
+    return(kegg_result)
+
+  }
+
+
+  if (
+    !"geneID" %in% names(kegg_result)
+  ) {
+
+    return(kegg_result)
+
+  }
+
+
+  if (
+    is.null(mapping) ||
+    nrow(mapping) == 0
+  ) {
+
+    return(kegg_result)
+
+  }
+
+
+  # ----------------------------------------------------------
+  # Create Entrez -> SYMBOL lookup
+  # ----------------------------------------------------------
+
+  mapping$ENTREZID <- as.character(
+    mapping$ENTREZID
+  )
+
+  mapping$SYMBOL <- as.character(
+    mapping$SYMBOL
+  )
+
+
+  mapping <- mapping[
+    !duplicated(mapping$ENTREZID),
+    ,
+    drop = FALSE
+  ]
+
+
+  entrez_to_symbol <- setNames(
+    mapping$SYMBOL,
+    mapping$ENTREZID
+  )
+
+
+  # ----------------------------------------------------------
+  # Preserve original Entrez IDs
+  # ----------------------------------------------------------
+
+  kegg_result$Entrez_ID <- as.character(
+    kegg_result$geneID
+  )
+
+
+  # ----------------------------------------------------------
+  # Convert every pathway
+  # ----------------------------------------------------------
+
+  converted_geneID <- sapply(
+
+    kegg_result$geneID,
+
+    function(x) {
+
+      if (
+        is.na(x) ||
+        x == ""
+      ) {
+
+        return("")
+
+      }
+
+
+      # Split pathway-specific Entrez IDs
+      ids <- unlist(
+        strsplit(
+          as.character(x),
+          "/",
+          fixed = TRUE
+        )
+      )
+
+
+      ids <- trimws(ids)
+
+
+      # Convert to symbols
+      symbols <- unname(
+        entrez_to_symbol[ids]
+      )
+
+
+      # Keep successfully mapped symbols
+      symbols <- symbols[
+        !is.na(symbols) &
+          symbols != ""
+      ]
+
+
+      # Remove duplicates
+      symbols <- unique(
+        symbols
+      )
+
+
+      # Combine using /
+      paste(
+        symbols,
+        collapse = "/"
+      )
+
+    }
+
+  )
+
+
+  # ----------------------------------------------------------
+  # Replace KEGG geneID
+  # ----------------------------------------------------------
+
+  kegg_result$geneID <- as.character(
+    converted_geneID
+  )
+
+
+  # ----------------------------------------------------------
+  # Number of genes represented by symbols
+  # ----------------------------------------------------------
+
+  kegg_result$Gene_Symbol_Count <- sapply(
+
+    kegg_result$geneID,
+
+    function(x) {
+
+      if (
+        is.na(x) ||
+        x == ""
+      ) {
+
+        return(0)
+      }
+
+
+      length(
+        unique(
+          unlist(
+            strsplit(
+              x,
+              "/",
+              fixed = TRUE
+            )
+          )
+        )
+      )
+
+    }
+
+  )
+
+
+  return(kegg_result)
+
+}
+
+
+# ============================================================
+# 10. PROCESS ONE VIRUS
+# ============================================================
+
+process_virus <- function(
+    virus_data,
+    virus_name
+) {
+
+  cat("\n")
+  cat("====================================================\n")
+  cat(
+    "VIRUS: ",
+    virus_name,
+    "\n",
+    sep = ""
+  )
+  cat("====================================================\n")
+
+
+  # ----------------------------------------------------------
+  # Get genes from actual input data
+  # ----------------------------------------------------------
+
+  genes <- unique(
+    trimws(
+      as.character(
+        virus_data$SYMBOL
+      )
+    )
+  )
+
+
+  genes <- genes[
+    !is.na(genes) &
+      genes != ""
+  ]
+
+
+  cat(
+    "Input genes: ",
+    length(genes),
+    "\n",
+    sep = ""
+  )
+
+
+  # ----------------------------------------------------------
+  # SYMBOL -> ENTREZ
+  # ----------------------------------------------------------
+
+  mapping <- convert_symbols(
+    genes
+  )
+
+
+  if (
+    nrow(mapping) == 0
+  ) {
+
+    cat(
+      "No genes mapped to Entrez IDs.\n"
+    )
+
+    return(
+      list(
+        KEGG = data.frame(),
+        Mapping = mapping,
+        InputGenes = length(genes),
+        MappedGenes = 0,
+        EntrezIDs = 0
+      )
+    )
+
+  }
+
+
+  entrez_ids <- unique(
+    as.character(
+      mapping$ENTREZID
+    )
+  )
+
+
+  cat(
+    "Mapped genes: ",
+    length(unique(mapping$SYMBOL)),
+    "\n",
+    sep = ""
+  )
+
+
+  cat(
+    "Entrez IDs: ",
+    length(entrez_ids),
+    "\n",
+    sep = ""
+  )
+
+
+  # ----------------------------------------------------------
+  # KEGG
+  # ----------------------------------------------------------
+
+  KEGG <- run_KEGG(
+    entrez_ids
+  )
+
+
+  # ----------------------------------------------------------
+  # Convert KEGG geneID to SYMBOL
+  # ----------------------------------------------------------
+
+  KEGG <- convert_kegg_geneID(
+    KEGG,
+    mapping
+  )
+
+
+  # ----------------------------------------------------------
+  # Add virus name
+  # ----------------------------------------------------------
+
+  if (
+    nrow(KEGG) > 0
+  ) {
+
+    KEGG$Virus <- virus_name
+
+
+    KEGG <- KEGG[
+      c(
+        "Virus",
+        setdiff(
+          names(KEGG),
+          "Virus"
+        )
+      )
+    ]
+
+  }
+
+
+  cat(
+    "KEGG pathways: ",
+    nrow(KEGG),
+    "\n",
+    sep = ""
+  )
+
+
+  return(
+    list(
+
+      KEGG = KEGG,
+
+      Mapping = mapping,
+
+      InputGenes =
+        length(genes),
+
+      MappedGenes =
+        length(unique(mapping$SYMBOL)),
+
+      EntrezIDs =
+        length(entrez_ids)
+
+    )
+  )
+
+}
+
+
+# ============================================================
+# 11. PROCESS SERUM / PLASMA
+# ============================================================
+
+process_dataset <- function(
+    input_file,
+    sheet_name,
+    output_file,
+    dataset_name
+) {
+
+  cat("\n\n")
+  cat("####################################################\n")
+  cat(
+    "DATASET: ",
+    dataset_name,
+    "\n",
+    sep = ""
+  )
+  cat("####################################################\n")
+
+
+  # ==========================================================
+  # READ EXCEL
+  # ==========================================================
+
+  data <- read.xlsx(
+    input_file,
+    sheet = sheet_name
+  )
+
+
+  # ==========================================================
+  # CLEAN COLUMN NAMES
+  # ==========================================================
+
+  names(data) <- trimws(
+    names(data)
+  )
+
+
+  cat("\nColumns found:\n")
+  print(
+    names(data)
+  )
+
+
+  # ==========================================================
+  # CHECK COLUMNS
+  # ==========================================================
+
+  required_columns <- c(
+    "SYMBOL",
+    "Disease_(Virus)"
+  )
+
+
+  missing_columns <- setdiff(
+    required_columns,
+    names(data)
+  )
+
+
+  if (
+    length(missing_columns) > 0
+  ) {
+
+    stop(
+      paste(
+        "Missing required columns:",
+        paste(
+          missing_columns,
+          collapse = ", "
+        )
+      )
+    )
+
+  }
+
+
+  # ==========================================================
+  # CLEAN DATA
+  # ==========================================================
+
+  data$SYMBOL <- trimws(
+    as.character(
+      data$SYMBOL
+    )
+  )
+
+
+  data$Virus <- trimws(
+    as.character(
+      data[["Disease_(Virus)"]]
+    )
+  )
+
+
+  data <- data[
+    !is.na(data$SYMBOL) &
+      data$SYMBOL != "" &
+      !is.na(data$Virus) &
+      data$Virus != "",
+    ,
+    drop = FALSE
+  ]
+
+
+  # ==========================================================
+  # GET VIRUSES
+  # ==========================================================
+
+  viruses <- unique(
+    data$Virus
+  )
+
+
+  viruses <- viruses[
+    !is.na(viruses) &
+      viruses != ""
+  ]
+
+
+  cat("\nViruses detected:\n")
+  print(viruses)
+
+
+  # ==========================================================
+  # STORE ALL KEGG RESULTS
+  # ==========================================================
+
+  all_KEGG <- data.frame()
+
+
+  # ==========================================================
+  # STORE ALL GENE MAPPINGS
+  # ==========================================================
+
+  all_mapping <- data.frame()
+
+
+  # ==========================================================
+  # PROCESS EACH VIRUS
+  # ==========================================================
+
+  for (
+    virus in viruses
+  ) {
+
+    virus_data <- data[
+      data$Virus == virus,
+      ,
+      drop = FALSE
+    ]
+
+
+    results <- process_virus(
+      virus_data,
+      virus
+    )
+
+
+    # --------------------------------------------------------
+    # Combine KEGG results
+    # --------------------------------------------------------
+
+    if (
+      nrow(results$KEGG) > 0
+    ) {
+
+      all_KEGG <- rbind(
+        all_KEGG,
+        results$KEGG
+      )
+
+    }
+
+
+    # --------------------------------------------------------
+    # Combine mappings
+    # --------------------------------------------------------
+
+    if (
+      nrow(results$Mapping) > 0
+    ) {
+
+      mapping <- results$Mapping
+
+
+      mapping$Virus <- virus
+
+
+      mapping <- mapping[
+        c(
+          "Virus",
+          "SYMBOL",
+          "ENTREZID"
+        )
+      ]
+
+
+      all_mapping <- rbind(
+        all_mapping,
+        mapping
+      )
+
+    }
+
+  }
+
+
+  # ==========================================================
+  # CREATE OUTPUT WORKBOOK
+  # ==========================================================
+
+  wb <- createWorkbook()
+
+
+  # ==========================================================
+  # KEGG_DATA
+  #
+  # ALL VIRUSES IN ONE SHEET
+  # ==========================================================
+
+  addWorksheet(
+    wb,
+    "KEGG_DATA"
+  )
+
+
+  if (
+    nrow(all_KEGG) > 0
+  ) {
+
+    # --------------------------------------------------------
+    # Put important columns first
+    # --------------------------------------------------------
+
+    preferred_columns <- c(
+
+      "Virus",
+
+      "ID",
+
+      "Description",
+
+      "GeneRatio",
+
+      "BgRatio",
+
+      "pvalue",
+
+      "p.adjust",
+
+      "qvalue",
+
+      "geneID",
+
+      "Entrez_ID",
+
+      "Gene_Symbol_Count",
+
+      "Count"
+
+    )
+
+
+    existing_columns <- intersect(
+      preferred_columns,
+      names(all_KEGG)
+    )
+
+
+    remaining_columns <- setdiff(
+      names(all_KEGG),
+      existing_columns
+    )
+
+
+    all_KEGG <- all_KEGG[
+      c(
+        existing_columns,
+        remaining_columns
+      )
+    ]
+
+
+    writeData(
+      wb,
+      "KEGG_DATA",
+      all_KEGG,
+      rowNames = FALSE
+    )
+
+
+  } else {
+
+    writeData(
+      wb,
+      "KEGG_DATA",
+
+      data.frame(
+        Message =
+          "No KEGG pathways returned"
+      ),
+
+      rowNames = FALSE
+    )
+
+  }
+
+
+  # ==========================================================
+  # GENE_MAPPING
+  # ==========================================================
+
+  addWorksheet(
+    wb,
+    "Gene_Mapping"
+  )
+
+
+  if (
+    nrow(all_mapping) > 0
+  ) {
+
+    writeData(
+      wb,
+      "Gene_Mapping",
+      all_mapping,
+      rowNames = FALSE
+    )
+
+  } else {
+
+    writeData(
+      wb,
+      "Gene_Mapping",
+
+      data.frame(
+        Message =
+          "No genes could be mapped"
+      ),
+
+      rowNames = FALSE
+    )
+
+  }
+
+
+  # ==========================================================
+  # FORMAT HEADERS
+  # ==========================================================
+
+  header_style <- createStyle(
+    textDecoration = "bold",
+    halign = "center"
+  )
+
+
+  if (
+    nrow(all_KEGG) > 0
+  ) {
+
+    addStyle(
+      wb,
+      "KEGG_DATA",
+      header_style,
+      rows = 1,
+      cols = 1:ncol(all_KEGG),
+      gridExpand = TRUE
+    )
+
+  }
+
+
+  if (
+    nrow(all_mapping) > 0
+  ) {
+
+    addStyle(
+      wb,
+      "Gene_Mapping",
+      header_style,
+      rows = 1,
+      cols = 1:ncol(all_mapping),
+      gridExpand = TRUE
+    )
+
+  }
+
+
+  # ==========================================================
+  # FREEZE HEADER
+  # ==========================================================
+
+  freezePane(
+    wb,
+    "KEGG_DATA",
+    firstRow = TRUE
+  )
+
+
+  freezePane(
+    wb,
+    "Gene_Mapping",
+    firstRow = TRUE
+  )
+
+
+  # ==========================================================
+  # COLUMN WIDTH
+  # ==========================================================
+
+  if (
+    nrow(all_KEGG) > 0
+  ) {
+
+    setColWidths(
+      wb,
+      "KEGG_DATA",
+      cols = 1:ncol(all_KEGG),
+      widths = "auto"
+    )
+
+  }
+
+
+  if (
+    nrow(all_mapping) > 0
+  ) {
+
+    setColWidths(
+      wb,
+      "Gene_Mapping",
+      cols = 1:ncol(all_mapping),
+      widths = "auto"
+    )
+
+  }
+
+
+  # ==========================================================
+  # SAVE
+  # ==========================================================
+
+  saveWorkbook(
+    wb,
+    output_file,
+    overwrite = TRUE
+  )
+
+
+  # ==========================================================
+  # FINAL INFORMATION
+  # ==========================================================
+
+  cat("\n")
+  cat("####################################################\n")
+  cat(
+    dataset_name,
+    " KEGG ANALYSIS COMPLETED\n"
+  )
+  cat("####################################################\n")
+
+
+  cat(
+    "Output file:\n",
+    output_file,
+    "\n"
+  )
+
+
+  cat(
+    "Viruses analysed: ",
+    length(viruses),
+    "\n",
+    sep = ""
+  )
+
+
+  cat(
+    "Total KEGG rows: ",
+    nrow(all_KEGG),
+    "\n",
+    sep = ""
+  )
+
+
+  cat("####################################################\n")
+
+}
+
+
+# ============================================================
+# 12. RUN SERUM
+# ============================================================
+
+process_dataset(
+
+  input_file =
+    SERUM_FILE,
+
+  sheet_name =
+    SERUM_SHEET,
+
+  output_file =
+    SERUM_OUTPUT,
+
+  dataset_name =
+    "SERUM"
+
+)
+
+
+# ============================================================
+# 13. RUN PLASMA
+# ============================================================
+
+process_dataset(
+
+  input_file =
+    PLASMA_FILE,
+
+  sheet_name =
+    PLASMA_SHEET,
+
+  output_file =
+    PLASMA_OUTPUT,
+
+  dataset_name =
+    "PLASMA"
+
+)
+
+
+# ============================================================
+# 14. FINAL MESSAGE
+# ============================================================
+
+cat("\n")
+cat("====================================================\n")
+cat("KEGG ANALYSIS COMPLETED SUCCESSFULLY\n")
+cat("====================================================\n")
+
+cat("\nSERUM OUTPUT:\n")
+cat(
+  SERUM_OUTPUT,
+  "\n"
+)
+
+cat("\nPLASMA OUTPUT:\n")
+cat(
+  PLASMA_OUTPUT,
+  "\n"
+)
+
+cat("\nAll viruses are combined in KEGG_DATA.\n")
+cat("KEGG geneID contains GENE SYMBOLS.\n")
+cat("Entrez_ID contains the original Entrez IDs.\n")
+
+cat("====================================================\n")
