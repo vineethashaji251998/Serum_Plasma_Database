@@ -1,0 +1,919 @@
+# ============================================================
+# Differential protein expression analysis
+# LIMMA — Independent pairwise comparisons against Healthy
+# ============================================================
+
+library(limma)
+library(dplyr)
+
+
+# ============================================================
+# 1. PATHS
+# ============================================================
+
+main_path <- "D:/Ph.D/First_Objective/Devika_Reanalysis/Covid_19_data/35958562"
+
+output_dir <- file.path(
+  main_path,
+  "Differential_Results_Healthy_Comparisons"
+)
+
+if (!dir.exists(output_dir)) {
+  dir.create(
+    output_dir,
+    recursive = TRUE
+  )
+}
+
+
+# ============================================================
+# 2. LOAD DATA
+# ============================================================
+
+# Metadata
+metadata <- read.csv(
+  file.path(
+    main_path,
+    "Metadata_1_35958562.csv"
+  ),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+# Protein abundance data
+prot_raw <- read.csv(
+  file.path(
+    main_path,
+    "Data_1.csv"
+  ),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+
+# ============================================================
+# 3. PREPARE PROTEIN MATRIX
+# ============================================================
+
+# First column = GeneName
+gene_names <- trimws(
+  as.character(
+    prot_raw$GeneName
+  )
+)
+
+# Remove empty gene names
+valid_genes <- !is.na(gene_names) &
+  gene_names != ""
+
+prot_raw <- prot_raw[
+  valid_genes,
+  ,
+  drop = FALSE
+]
+
+gene_names <- gene_names[
+  valid_genes
+]
+
+# Make gene names unique
+gene_names <- make.unique(
+  gene_names
+)
+
+# Set row names
+rownames(prot_raw) <- gene_names
+
+# Remove GeneName column
+prot_raw <- prot_raw[
+  ,
+  setdiff(
+    colnames(prot_raw),
+    "GeneName"
+  ),
+  drop = FALSE
+]
+
+# Convert expression values to numeric
+prot_raw[] <- lapply(
+  prot_raw,
+  function(x) {
+    suppressWarnings(
+      as.numeric(
+        as.character(x)
+      )
+    )
+  }
+)
+
+# Convert to matrix
+expr_matrix <- as.matrix(
+  prot_raw
+)
+
+
+# ============================================================
+# 4. NORMALIZE SAMPLE IDs
+# ============================================================
+
+normalize_id <- function(x) {
+  
+  x <- trimws(x)
+  
+  # S03_1 -> S3_1
+  # S007  -> S7
+  #
+  # H2, H3, etc. remain unchanged
+  
+  sub(
+    "^S0+",
+    "S",
+    x
+  )
+}
+
+
+# Normalize expression sample names
+colnames(expr_matrix) <- normalize_id(
+  colnames(expr_matrix)
+)
+
+# Normalize metadata sample IDs
+metadata$SampleID <- normalize_id(
+  metadata$SampleID
+)
+
+
+# ============================================================
+# 5. STANDARDIZE CONDITION NAMES
+# ============================================================
+
+metadata$Condition <- trimws(
+  metadata$Condition
+)
+
+metadata$Condition[
+  tolower(metadata$Condition) == "healthy"
+] <- "Healthy"
+
+metadata$Condition[
+  tolower(metadata$Condition) == "asymptomatic"
+] <- "Asymptomatic"
+
+metadata$Condition[
+  tolower(metadata$Condition) == "mild"
+] <- "Mild"
+
+metadata$Condition[
+  tolower(metadata$Condition) == "moderate"
+] <- "Moderate"
+
+metadata$Condition[
+  tolower(metadata$Condition) == "severe"
+] <- "Severe"
+
+metadata$Condition[
+  tolower(metadata$Condition) == "critical"
+] <- "Critical"
+
+metadata$Condition[
+  tolower(metadata$Condition) == "non-covid-19"
+] <- "Non-COVID-19"
+
+metadata$Condition[
+  tolower(metadata$Condition) == "non_covid_19"
+] <- "Non-COVID-19"
+
+
+# ============================================================
+# 6. DEFINE CONDITIONS TO COMPARE
+# ============================================================
+
+conditions_to_compare <- c(
+  "Asymptomatic",
+  "Mild",
+  "Moderate",
+  "Severe",
+  "Critical"
+)
+
+cat("\n")
+cat("============================================\n")
+cat("Conditions to be compared with Healthy\n")
+cat("============================================\n")
+
+print(
+  conditions_to_compare
+)
+
+cat("\n")
+
+
+# ============================================================
+# 7. CHECK AVAILABLE CONDITIONS
+# ============================================================
+
+cat("Available conditions in metadata:\n")
+
+print(
+  table(
+    metadata$Condition,
+    useNA = "ifany"
+  )
+)
+
+cat("\n")
+
+
+# ============================================================
+# 8. CHECK HEALTHY GROUP
+# ============================================================
+
+if (!"Healthy" %in% metadata$Condition) {
+  
+  stop(
+    "Healthy group was not found in metadata."
+  )
+}
+
+
+# ============================================================
+# 9. MATCH ALL SAMPLES
+# ============================================================
+
+common_samples <- intersect(
+  colnames(expr_matrix),
+  metadata$SampleID
+)
+
+if (length(common_samples) == 0) {
+  
+  stop(
+    "No common samples found between metadata and expression data."
+  )
+}
+
+# Keep only common samples
+metadata <- metadata %>%
+  filter(
+    SampleID %in% common_samples
+  )
+
+# Reorder metadata according to expression matrix
+metadata <- metadata[
+  match(
+    common_samples,
+    metadata$SampleID
+  ),
+  ,
+  drop = FALSE
+]
+
+# Reorder expression matrix
+expr_matrix <- expr_matrix[
+  ,
+  metadata$SampleID,
+  drop = FALSE
+]
+
+# Check order
+stopifnot(
+  identical(
+    metadata$SampleID,
+    colnames(expr_matrix)
+  )
+)
+
+cat(
+  "Total matched samples:",
+  ncol(expr_matrix),
+  "\n\n"
+)
+
+
+# ============================================================
+# 10. FUNCTION FOR CLEANING + IMPUTATION
+# ============================================================
+#
+# IMPORTANT:
+#
+# This function is applied separately for every comparison.
+#
+# Therefore:
+#
+# Asymptomatic vs Healthy
+# -> imputation uses only Healthy + Asymptomatic
+#
+# Mild vs Healthy
+# -> imputation uses only Healthy + Mild
+#
+# etc.
+#
+# This follows the independent two-group workflow.
+# ============================================================
+
+clean_and_impute <- function(m) {
+  
+  # Convert zero to NA
+  m[m == 0] <- NA
+  
+  # Remove proteins with no observed values
+  keep <- rowSums(
+    !is.na(m)
+  ) > 0
+  
+  m <- m[
+    keep,
+    ,
+    drop = FALSE
+  ]
+  
+  # Median imputation per protein
+  m <- t(
+    apply(
+      m,
+      1,
+      function(x) {
+        
+        if (any(is.na(x))) {
+          
+          x[is.na(x)] <- median(
+            x,
+            na.rm = TRUE
+          )
+        }
+        
+        x
+      }
+    )
+  )
+  
+  return(
+    list(
+      matrix = m,
+      keep = keep
+    )
+  )
+}
+
+
+# ============================================================
+# 11. RUN EACH CONDITION vs HEALTHY INDEPENDENTLY
+# ============================================================
+
+for (condition in conditions_to_compare) {
+  
+  cat("\n")
+  cat("============================================\n")
+  cat(
+    "STARTING:",
+    condition,
+    "vs Healthy\n"
+  )
+  cat("============================================\n")
+  
+  
+  # ==========================================================
+  # 11.1 SELECT ONLY HEALTHY + CURRENT CONDITION
+  # ==========================================================
+  
+  pair_metadata <- metadata %>%
+    filter(
+      Condition %in% c(
+        "Healthy",
+        condition
+      )
+    )
+  
+  
+  # ==========================================================
+  # 11.2 FIND COMMON SAMPLES
+  # ==========================================================
+  
+  pair_samples <- intersect(
+    pair_metadata$SampleID,
+    colnames(expr_matrix)
+  )
+  
+  if (length(pair_samples) == 0) {
+    
+    cat(
+      "Skipping",
+      condition,
+      "- no matching samples.\n"
+    )
+    
+    next
+  }
+  
+  
+  # Reorder metadata to match expression matrix
+  pair_metadata <- pair_metadata[
+    match(
+      pair_samples,
+      pair_metadata$SampleID
+    ),
+    ,
+    drop = FALSE
+  ]
+  
+  
+  # ==========================================================
+  # 11.3 CHECK SAMPLE NUMBERS
+  # ==========================================================
+  
+  n_healthy <- sum(
+    pair_metadata$Condition == "Healthy"
+  )
+  
+  n_condition <- sum(
+    pair_metadata$Condition == condition
+  )
+  
+  cat(
+    "Healthy samples:",
+    n_healthy,
+    "\n"
+  )
+  
+  cat(
+    condition,
+    "samples:",
+    n_condition,
+    "\n"
+  )
+  
+  # Need at least 2 samples per group
+  if (n_healthy < 2) {
+    
+    cat(
+      "Skipping",
+      condition,
+      "- fewer than 2 Healthy samples.\n"
+    )
+    
+    next
+  }
+  
+  if (n_condition < 2) {
+    
+    cat(
+      "Skipping",
+      condition,
+      "- fewer than 2 condition samples.\n"
+    )
+    
+    next
+  }
+  
+  
+  # ==========================================================
+  # 11.4 EXTRACT ONLY THESE SAMPLES
+  # ==========================================================
+  
+  expr_pair <- expr_matrix[
+    ,
+    pair_samples,
+    drop = FALSE
+  ]
+  
+  
+  # ==========================================================
+  # 11.5 VERIFY DIMENSIONS BEFORE LIMMA
+  # ==========================================================
+  
+  if (
+    ncol(expr_pair) !=
+    nrow(pair_metadata)
+  ) {
+    
+    stop(
+      paste0(
+        "Sample mismatch for ",
+        condition,
+        " vs Healthy: ",
+        "expression has ",
+        ncol(expr_pair),
+        " samples but metadata has ",
+        nrow(pair_metadata),
+        " samples."
+      )
+    )
+  }
+  
+  
+  # ==========================================================
+  # 11.6 CLEAN + IMPUTE
+  # ==========================================================
+  
+  cleaned <- clean_and_impute(
+    expr_pair
+  )
+  
+  expr_pair <- cleaned$matrix
+  
+  keep <- cleaned$keep
+  
+  
+  # Restore row names
+  rownames(expr_pair) <- rownames(
+    expr_matrix
+  )[keep]
+  
+  # Restore column names
+  colnames(expr_pair) <- pair_metadata$SampleID
+  
+  
+  cat(
+    "Proteins after cleaning:",
+    nrow(expr_pair),
+    "\n"
+  )
+  
+  
+  # ==========================================================
+  # 11.7 DEFINE GROUP FACTOR
+  # ==========================================================
+  
+  group_factor <- factor(
+    pair_metadata$Condition,
+    levels = c(
+      "Healthy",
+      condition
+    )
+  )
+  
+  
+  # ==========================================================
+  # 11.8 CREATE DESIGN MATRIX
+  # ==========================================================
+  
+  design <- model.matrix(
+    ~0 + group_factor
+  )
+  
+  colnames(design) <- c(
+    "Healthy",
+    condition
+  )
+  
+  
+  # ==========================================================
+  # 11.9 CRITICAL DIMENSION CHECK
+  # ==========================================================
+  
+  cat(
+    "Expression matrix samples:",
+    ncol(expr_pair),
+    "\n"
+  )
+  
+  cat(
+    "Design matrix rows:",
+    nrow(design),
+    "\n"
+  )
+  
+  if (
+    ncol(expr_pair) !=
+    nrow(design)
+  ) {
+    
+    stop(
+      paste0(
+        "Design/data dimension mismatch for ",
+        condition,
+        " vs Healthy."
+      )
+    )
+  }
+  
+  
+  # ==========================================================
+  # 11.10 LIMMA FIT
+  # ==========================================================
+  
+  fit <- lmFit(
+    expr_pair,
+    design
+  )
+  
+  
+  # ==========================================================
+  # 11.11 CONTRAST
+  # ==========================================================
+  
+  contrast.matrix <- makeContrasts(
+    contrasts = paste0(
+      condition,
+      " - Healthy"
+    ),
+    levels = design
+  )
+  
+  colnames(
+    contrast.matrix
+  ) <- paste0(
+    condition,
+    "_vs_Healthy"
+  )
+  
+  
+  # ==========================================================
+  # 11.12 CONTRAST + EBAYES
+  # ==========================================================
+  
+  fit2 <- contrasts.fit(
+    fit,
+    contrast.matrix
+  )
+  
+  fit2 <- eBayes(
+    fit2
+  )
+  
+  
+  # ==========================================================
+  # 11.13 ALL PROTEIN RESULTS
+  # ==========================================================
+  
+  comparison_name <- paste0(
+    condition,
+    "_vs_Healthy"
+  )
+  
+  res <- topTable(
+    fit2,
+    coef = comparison_name,
+    number = Inf,
+    adjust.method = "BH",
+    sort.by = "P"
+  )
+  
+  res$Protein <- rownames(
+    res
+  )
+  
+  rownames(res) <- NULL
+  
+  res <- res[
+    ,
+    c(
+      "Protein",
+      "logFC",
+      "AveExpr",
+      "t",
+      "P.Value",
+      "adj.P.Val",
+      "B"
+    )
+  ]
+  
+  
+  # ==========================================================
+  # 11.14 SAVE ALL PROTEINS
+  # ==========================================================
+  
+  write.csv(
+    res,
+    file.path(
+      output_dir,
+      paste0(
+        comparison_name,
+        "_DEP_All.csv"
+      )
+    ),
+    row.names = FALSE
+  )
+  
+  
+  # ==========================================================
+  # 11.15 SIGNIFICANT DEPs
+  # ==========================================================
+  
+  sig_res <- res[
+    !is.na(res$P.Value) &
+      res$P.Value < 0.05 &
+      abs(res$logFC) >= 0.5,
+    ,
+    drop = FALSE
+  ]
+  
+  write.csv(
+    sig_res,
+    file.path(
+      output_dir,
+      paste0(
+        comparison_name,
+        "_DEP_Significant.csv"
+      )
+    ),
+    row.names = FALSE
+  )
+  
+  
+  # ==========================================================
+  # 11.16 UPREGULATED
+  # ==========================================================
+  #
+  # Condition > Healthy
+  #
+  # logFC >= 0.5
+  # P.Value < 0.05
+  # ==========================================================
+  
+  up_res <- res[
+    !is.na(res$P.Value) &
+      res$P.Value < 0.05 &
+      res$logFC >= 0.5,
+    ,
+    drop = FALSE
+  ]
+  
+  write.csv(
+    up_res,
+    file.path(
+      output_dir,
+      paste0(
+        comparison_name,
+        "_DEP_UP.csv"
+      )
+    ),
+    row.names = FALSE
+  )
+  
+  
+  # ==========================================================
+  # 11.17 DOWNREGULATED
+  # ==========================================================
+  #
+  # Condition < Healthy
+  #
+  # logFC <= -0.5
+  # P.Value < 0.05
+  # ==========================================================
+  
+  down_res <- res[
+    !is.na(res$P.Value) &
+      res$P.Value < 0.05 &
+      res$logFC <= -0.5,
+    ,
+    drop = FALSE
+  ]
+  
+  write.csv(
+    down_res,
+    file.path(
+      output_dir,
+      paste0(
+        comparison_name,
+        "_DEP_DOWN.csv"
+      )
+    ),
+    row.names = FALSE
+  )
+  
+  
+  # ==========================================================
+  # 11.18 SAVE METADATA
+  # ==========================================================
+  
+  write.csv(
+    pair_metadata,
+    file.path(
+      output_dir,
+      paste0(
+        comparison_name,
+        "_Metadata.csv"
+      )
+    ),
+    row.names = FALSE
+  )
+  
+  
+  # ==========================================================
+  # 11.19 SAVE DESIGN MATRIX
+  # ==========================================================
+  
+  write.csv(
+    design,
+    file.path(
+      output_dir,
+      paste0(
+        comparison_name,
+        "_Design_Matrix.csv"
+      )
+    ),
+    row.names = TRUE
+  )
+  
+  
+  # ==========================================================
+  # 11.20 SAVE CONTRAST MATRIX
+  # ==========================================================
+  
+  write.csv(
+    contrast.matrix,
+    file.path(
+      output_dir,
+      paste0(
+        comparison_name,
+        "_Contrast_Matrix.csv"
+      )
+    ),
+    row.names = TRUE
+  )
+  
+  
+  # ==========================================================
+  # 11.21 PRINT SUMMARY
+  # ==========================================================
+  
+  cat("\n")
+  cat("--------------------------------------------\n")
+  cat(
+    "Completed:",
+    comparison_name,
+    "\n"
+  )
+  cat("--------------------------------------------\n")
+  
+  cat(
+    "Healthy samples:",
+    n_healthy,
+    "\n"
+  )
+  
+  cat(
+    condition,
+    "samples:",
+    n_condition,
+    "\n"
+  )
+  
+  cat(
+    "Proteins analyzed:",
+    nrow(res),
+    "\n"
+  )
+  
+  cat(
+    "Significant DEPs:",
+    nrow(sig_res),
+    "\n"
+  )
+  
+  cat(
+    "UP-regulated:",
+    nrow(up_res),
+    "\n"
+  )
+  
+  cat(
+    "DOWN-regulated:",
+    nrow(down_res),
+    "\n"
+  )
+  
+  cat(
+    "Output:",
+    output_dir,
+    "\n"
+  )
+}
+
+
+# ============================================================
+# 12. FINAL MESSAGE
+# ============================================================
+
+cat("\n")
+cat("============================================\n")
+cat("ALL COMPARISONS COMPLETED\n")
+cat("============================================\n")
+
+cat("\nComparisons performed:\n")
+
+for (condition in conditions_to_compare) {
+  
+  cat(
+    condition,
+    "vs Healthy\n"
+  )
+}
+
+cat("\n")
+cat("Contrast direction:\n")
+cat("Condition - Healthy\n")
+cat("\n")
+cat("Positive logFC = Higher in condition\n")
+cat("Negative logFC = Lower in condition\n")
+cat("\n")
+cat("DEP criteria:\n")
+cat("P.Value < 0.05\n")
+cat("|logFC| >= 0.5\n")
+cat("\n")
+cat("Output directory:\n")
+cat(output_dir)
+cat("\n")
+cat("============================================\n")
