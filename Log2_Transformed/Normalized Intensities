@@ -1,0 +1,523 @@
+# ============================================================
+# limma differential protein analysis - PMID 36507225
+# Long-COVID vs Healthy
+# Recovered vs Healthy
+# Long-COVID vs Recovered
+#
+# Input values are ALREADY log2 LFQ intensities
+# NO further log2 transformation
+# ============================================================
+
+library(limma)
+
+# ------------------------------------------------------------
+# 1. SETTINGS
+# ------------------------------------------------------------
+
+main_path <- "D:/Ph.D/First_Objective/Devika_Reanalysis/Covid_19_data/Plasma/36507225"
+
+data_file <- "36507225_Data.csv"
+meta_file <- "36507225_MetaData.csv"
+
+out_dir <- file.path(main_path, "Differential_Results")
+
+adj_p_cut <- 0.05
+fc_cut <- 0.5
+
+
+# ------------------------------------------------------------
+# 2. CREATE OUTPUT DIRECTORY
+# ------------------------------------------------------------
+
+dir.create(
+  out_dir,
+  showWarnings = FALSE,
+  recursive = TRUE
+)
+
+
+# ------------------------------------------------------------
+# 3. READ DATA
+# ------------------------------------------------------------
+
+dat <- read.csv(
+  file.path(main_path, data_file),
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+meta <- read.csv(
+  file.path(main_path, meta_file),
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+
+# ------------------------------------------------------------
+# 4. CLEAN METADATA
+# ------------------------------------------------------------
+
+meta$SampleID <- trimws(meta$SampleID)
+meta$Condition <- trimws(meta$Condition)
+
+meta <- meta[
+  !is.na(meta$SampleID) &
+    meta$SampleID != "" &
+    !is.na(meta$Condition) &
+    meta$Condition != "",
+]
+
+meta <- meta[!duplicated(meta$SampleID), ]
+
+cat("\n============================================\n")
+cat("Samples per group\n")
+cat("============================================\n")
+
+print(table(meta$Condition))
+
+
+# ------------------------------------------------------------
+# 5. CHECK THAT ALL METADATA SAMPLES EXIST
+# ------------------------------------------------------------
+
+missing_samples <- setdiff(
+  meta$SampleID,
+  colnames(dat)
+)
+
+if (length(missing_samples) > 0) {
+  
+  cat("\nMissing samples:\n")
+  print(missing_samples)
+  
+  stop(
+    "Some SampleID values in metadata are not present in the data file."
+  )
+}
+
+
+# ------------------------------------------------------------
+# 6. EXPRESSION MATRIX
+# ------------------------------------------------------------
+
+expr <- as.matrix(
+  dat[, meta$SampleID, drop = FALSE]
+)
+
+mode(expr) <- "numeric"
+
+rownames(expr) <- dat$Accession
+
+gene <- setNames(
+  dat[["Gene names"]],
+  dat$Accession
+)
+
+
+# ------------------------------------------------------------
+# 7. CHECK DATA RANGE
+# ------------------------------------------------------------
+
+cat("\n============================================\n")
+cat("Expression data range\n")
+cat("============================================\n")
+
+cat(
+  "Minimum:",
+  round(min(expr, na.rm = TRUE), 2),
+  "\n"
+)
+
+cat(
+  "Maximum:",
+  round(max(expr, na.rm = TRUE), 2),
+  "\n"
+)
+
+cat(
+  "Median:",
+  round(median(expr, na.rm = TRUE), 2),
+  "\n"
+)
+
+
+# ------------------------------------------------------------
+# 8. CHECK FOR LOG2 LFQ DATA
+# ------------------------------------------------------------
+
+if (max(expr, na.rm = TRUE) < 8) {
+  
+  warning(
+    "Maximum intensity is below 8. Please verify that the input contains log2 LFQ intensities."
+  )
+  
+}
+
+
+# ------------------------------------------------------------
+# 9. HANDLE ZERO VALUES
+# ------------------------------------------------------------
+
+zero_count <- sum(expr == 0, na.rm = TRUE)
+
+cat(
+  "\nNumber of zero values:",
+  zero_count,
+  "\n"
+)
+
+if (zero_count > 0) {
+  
+  expr[expr == 0] <- NA
+  
+}
+
+
+# ------------------------------------------------------------
+# 10. IMPUTE MISSING VALUES USING ROW MEDIAN
+# ------------------------------------------------------------
+
+expr <- t(
+  apply(
+    expr,
+    1,
+    function(x) {
+      
+      if (any(is.na(x))) {
+        
+        if (all(is.na(x))) {
+          return(x)
+        }
+        
+        x[is.na(x)] <- median(
+          x,
+          na.rm = TRUE
+        )
+        
+      }
+      
+      return(x)
+      
+    }
+  )
+)
+
+
+# ------------------------------------------------------------
+# 11. FUNCTION FOR LIMMA COMPARISON
+# ------------------------------------------------------------
+
+run_limma <- function(
+    case,
+    ref,
+    file_name
+) {
+  
+  cat("\n\n============================================\n")
+  cat("Comparison:", case, "vs", ref, "\n")
+  cat("============================================\n")
+  
+  
+  # ----------------------------------------------------------
+  # Select samples
+  # ----------------------------------------------------------
+  
+  keep <- meta$Condition %in% c(
+    ref,
+    case
+  )
+  
+  m <- meta[keep, , drop = FALSE]
+  
+  
+  # ----------------------------------------------------------
+  # Check sample numbers
+  # ----------------------------------------------------------
+  
+  cat("\nSample numbers:\n")
+  
+  print(
+    table(m$Condition)
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Expression matrix
+  # ----------------------------------------------------------
+  
+  x <- expr[
+    ,
+    m$SampleID,
+    drop = FALSE
+  ]
+  
+  
+  # ----------------------------------------------------------
+  # Group factor
+  # ----------------------------------------------------------
+  
+  grp <- factor(
+    m$Condition,
+    levels = c(
+      ref,
+      case
+    )
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Design matrix
+  # ----------------------------------------------------------
+  
+  design <- model.matrix(
+    ~ 0 + grp
+  )
+  
+  colnames(design) <- c(
+    "ref",
+    "case"
+  )
+  
+  
+  cat("\nDesign matrix:\n")
+  
+  print(design)
+  
+  
+  # ----------------------------------------------------------
+  # LIMMA
+  # ----------------------------------------------------------
+  
+  fit <- lmFit(
+    x,
+    design
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Contrast
+  # ----------------------------------------------------------
+  
+  contrast_matrix <- makeContrasts(
+    case - ref,
+    levels = design
+  )
+  
+  
+  fit2 <- contrasts.fit(
+    fit,
+    contrast_matrix
+  )
+  
+  
+  fit2 <- eBayes(
+    fit2
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Results
+  # ----------------------------------------------------------
+  
+  res <- topTable(
+    fit2,
+    number = Inf,
+    adjust.method = "BH",
+    sort.by = "P"
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Add protein and gene information
+  # ----------------------------------------------------------
+  
+  res <- data.frame(
+    Protein = rownames(res),
+    Gene = gene[rownames(res)],
+    res,
+    row.names = NULL,
+    stringsAsFactors = FALSE
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Regulation
+  #
+  # Positive logFC = higher in CASE
+  # Negative logFC = lower in CASE
+  # ----------------------------------------------------------
+  
+  res$Regulation <- "NS"
+  
+  res$Regulation[
+    res$adj.P.Val < adj_p_cut &
+      res$logFC >= fc_cut
+  ] <- "Up"
+  
+  
+  res$Regulation[
+    res$adj.P.Val < adj_p_cut &
+      res$logFC <= -fc_cut
+  ] <- "Down"
+  
+  
+  # ----------------------------------------------------------
+  # Save complete results
+  # ----------------------------------------------------------
+  
+  write.csv(
+    res,
+    file.path(
+      out_dir,
+      file_name
+    ),
+    row.names = FALSE
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Save UP proteins
+  # ----------------------------------------------------------
+  
+  up <- res[
+    res$Regulation == "Up",
+    ,
+    drop = FALSE
+  ]
+  
+  write.csv(
+    up,
+    file.path(
+      out_dir,
+      sub(
+        "\\.csv$",
+        "_UP.csv",
+        file_name
+      )
+    ),
+    row.names = FALSE
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Save DOWN proteins
+  # ----------------------------------------------------------
+  
+  down <- res[
+    res$Regulation == "Down",
+    ,
+    drop = FALSE
+  ]
+  
+  write.csv(
+    down,
+    file.path(
+      out_dir,
+      sub(
+        "\\.csv$",
+        "_DOWN.csv",
+        file_name
+      )
+    ),
+    row.names = FALSE
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Summary
+  # ----------------------------------------------------------
+  
+  cat("\nResults:\n")
+  
+  cat(
+    "Total proteins:",
+    nrow(res),
+    "\n"
+  )
+  
+  cat(
+    "UP proteins:",
+    nrow(up),
+    "\n"
+  )
+  
+  cat(
+    "DOWN proteins:",
+    nrow(down),
+    "\n"
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Display significant proteins
+  # ----------------------------------------------------------
+  
+  significant <- res[
+    res$Regulation != "NS",
+    c(
+      "Protein",
+      "Gene",
+      "logFC",
+      "P.Value",
+      "adj.P.Val",
+      "Regulation"
+    ),
+    drop = FALSE
+  ]
+  
+  cat("\nSignificant proteins:\n")
+  
+  print(
+    head(
+      significant,
+      20
+    )
+  )
+  
+  
+  invisible(res)
+  
+}
+
+
+# ============================================================
+# 12. RUN COMPARISONS
+# ============================================================
+
+# Long-COVID vs Healthy
+run_limma(
+  case = "Long-covid",
+  ref = "HC",
+  file_name = "Differential_Proteins_Long-covid_vs_HC.csv"
+)
+
+
+# Recovered vs Healthy
+run_limma(
+  case = "Recovered",
+  ref = "HC",
+  file_name = "Differential_Proteins_Recovered_vs_HC.csv"
+)
+
+
+# Long-COVID vs Recovered
+run_limma(
+  case = "Long-covid",
+  ref = "Recovered",
+  file_name = "Differential_Proteins_Long-covid_vs_Recovered.csv"
+)
+
+
+# ============================================================
+# 13. FINISHED
+# ============================================================
+
+cat("\n\n============================================\n")
+cat("LIMMA ANALYSIS COMPLETED\n")
+cat("============================================\n")
+
+cat(
+  "\nOutput folder:\n",
+  out_dir,
+  "\n"
+)
